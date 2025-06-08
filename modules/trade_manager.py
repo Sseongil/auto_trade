@@ -1,9 +1,9 @@
 # modules/trade_manager.py
-import pandas as pd
 import os
+import pandas as pd
 from datetime import datetime
 
-def add_position(code, name, buy_price):
+def add_position(code, name, buy_price, quantity):
     path = os.path.join("data", "positions.csv")
     today = datetime.today().strftime("%Y-%m-%d")
 
@@ -11,8 +11,10 @@ def add_position(code, name, buy_price):
         "ticker": code,
         "name": name,
         "buy_price": buy_price,
-        "quantity": 10,
-        "buy_date": today
+        "quantity": quantity,
+        "buy_date": today,
+        "half_exited": False,
+        "trail_high": buy_price
     }
 
     if os.path.exists(path):

@@ -1,9 +1,11 @@
+# server.py
 from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Dispatcher, CommandHandler, CallbackQueryHandler
-import subprocess
 
-# 🔑 토큰 및 chat ID
+# ✅ 자동매매 함수 import
+from modules.auto_trade import run_auto_trade
+
 BOT_TOKEN = "8081086653:AAFbATaP5fUVOJztvPtxQWaMRF0WPEOkUqo"
 AUTHORIZED_CHAT_ID = 1866728370
 
@@ -11,7 +13,6 @@ bot = Bot(token=BOT_TOKEN)
 app = Flask(__name__)
 dispatcher = Dispatcher(bot=bot, update_queue=None, workers=1, use_context=True)
 
-# ✅ /trade 명령어 처리
 def start_trade(update, context):
     chat_id = update.effective_chat.id
     print(f"👉 /trade 명령 수신: chat_id = {chat_id}")
@@ -26,7 +27,6 @@ def start_trade(update, context):
     reply_markup = InlineKeyboardMarkup(keyboard)
     bot.send_message(chat_id=chat_id, text="📊 자동매매 제어 패널", reply_markup=reply_markup)
 
-# ✅ 버튼 클릭 처리
 def handle_callback(update, context):
     query = update.callback_query
     data = query.data
@@ -35,17 +35,15 @@ def handle_callback(update, context):
     query.answer()
 
     if data == "start":
-        subprocess.Popen(["python", "modules/auto_trade.py"])
+        # ✅ 바로 함수 실행
+        run_auto_trade()
         query.edit_message_text(text="✅ 자동매매를 시작합니다.")
     elif data == "stop":
-        # TODO: 중지 기능은 다음 단계에서 구현
         query.edit_message_text(text="🛑 자동매매를 중지합니다.")
 
-# ✅ 핸들러 등록
 dispatcher.add_handler(CommandHandler("trade", start_trade))
 dispatcher.add_handler(CallbackQueryHandler(handle_callback))
 
-# ✅ Webhook 수신 처리
 @app.route('/webhook', methods=['POST'])
 def webhook_handler():
     print("✅ 웹훅 호출됨!")

@@ -1,63 +1,147 @@
-# check_conditions.py
-from modules.get_stock_list import get_krx_stock_list
+# modules/check_conditions.py
+
+import os
+import sys
 import pandas as pd
 from datetime import datetime, timedelta
-from pykrx.stock import get_market_ohlcv_by_date
+from pykiwoom.kiwoom import Kiwoom
 
-def get_filtered_stocks(df=None):
-    if df is None:
-        df = get_krx_stock_list()
+# 경로 보정
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-    if df is None or df.empty:
-        print("[ERROR] get_filtered_stocks: 입력된 DataFrame이 비어있습니다.")
-        return pd.DataFrame(columns=["ticker", "name"])
+kiwoom = Kiwoom()
+kiwoom.CommConnect(block=True)
 
-    # ✅ 시가총액 상위 500개로 확장
-    df = df.sort_values(by="market_cap", ascending=False).head(500)
+MIN_MARKET_CAP = 500         # 억 원
+MAX_MARKET_CAP = 5000
+MIN_VALUE = 5_000_000_000    # 평균 거래대금 최소
+today = datetime.today().strftime("%Y%m%d")
 
-    result = []
+# ✅ 종목 리스트
+def get_tickers():
+    kospi = kiwoom.GetCodeListByMarket("0")
+    kosdaq = kiwoom.GetCodeListByMarket("10")
+    return kospi + kosdaq
 
-    end_date = datetime.today()
-    start_date = end_date - timedelta(days=90)
+# ✅ 개별 종목 조건 확인
+def check_conditions(code):
+    try:
+        name = kiwoom.GetMasterCodeName(code)
 
-    for _, row in df.iterrows():
-        code = row['ticker']
-        name = row['name']
+        # 필터: ETF, 스팩, 우선주, 관리종목, 거래정지
+        if "스팩" in name or "우선주" in name:
+            return None
+        info = kiwoom.GetMasterConstruction(code)
+        if "관리" in info or "정지" in info:
+            return None
 
-        try:
-            ohlcv = get_market_ohlcv_by_date(start_date.strftime("%Y%m%d"),
-                                              end_date.strftime("%Y%m%d"),
-                                              code)
-            if ohlcv.empty or len(ohlcv) < 25:
-                continue
+        # 일봉 데이터
+        df = kiwoom.block_request(
+            "opt10081",
+            종목코드=code,
+            기준일자=today,
+            수정주가구분=1,
+            output="주식일봉차트조회",
+            next=0
+        )
+        if df is None or len(df) < 60:
+            return None
 
-            # ✅ 이동평균선 및 엔벨로프
-            ma20 = ohlcv['종가'].rolling(window=20).mean()
-            upper = ma20 * 1.2
-            lower = ma20 * 0.8
-            ma5 = ohlcv['종가'].rolling(window=5).mean()
+        df = df.sort_index(ascending=True)
+        df["MA5"] = df["현재가"].rolling(window=5).mean()
+        df["MA20"] = df["현재가"].rolling(window=20).mean()
+        df["MA60"] = df["현재가"].rolling(window=60).mean()
 
-            # ✅ 조건 1: 3개월 내 상단 터치 여부
-            touched_upper = (ohlcv['고가'] > upper).any()
+        ma5, ma20, ma60 = df["MA5"].iloc[-1], df["MA20"].iloc[-1], df["MA60"].iloc[-1]
+        curr_price = df["현재가"].iloc[-1]
 
-            # ✅ 조건 2: 최근 5일 내 하단 터치 여부
-            touched_lower_recent = (ohlcv['저가'].iloc[-5:] <= lower.iloc[-5:]).any()
+        if not (ma5 > ma20 > ma60):
+            return None
+        if not (curr_price > df["고가"].iloc[-20:].max()):
+            return None
 
-            # ✅ 조건 3: 오늘 종가 > 5일 이동평균
-            close_today = ohlcv['종가'].iloc[-1]
-            ma5_today = ma5.iloc[-1]
-            above_ma5 = close_today > ma5_today
+        curr_vol = df["거래량"].iloc[-1]
+        avg_vol = df["거래량"].iloc[-20:].mean()
+        if curr_vol < avg_vol * 2:
+            return None
 
-            if touched_upper and touched_lower_recent and above_ma5:
-                result.append((code, name))
+        df["거래대금"] = df["현재가"] * df["거래량"]
+        curr_value = df["거래대금"].iloc[-1]
+        avg_value = df["거래대금"].iloc[-20:].mean()
+        if curr_value < avg_value * 2 or avg_value < MIN_VALUE:
+            return None
 
-        except Exception as e:
-            print(f"{name}({code}) 에러: {e}")
+        high, low = df["고가"].iloc[-1], df["저가"].iloc[-1]
+        volatility = ((high - low) / low) * 100
+        if volatility > 15:
+            return None
 
-    return pd.DataFrame(result, columns=["ticker", "name"])
+        # 기본정보 조회
+        base = kiwoom.block_request("opt10001", 종목코드=code, output="주식기본정보", next=0)
+        market_cap_raw = base["시가총액"][0].replace(",", "")
+        market_cap = int(market_cap_raw) / 1e8  # 억원 단위
 
-# 단독 실행 시 테스트
+        if not (MIN_MARKET_CAP <= market_cap <= MAX_MARKET_CAP):
+            return None
+
+        # 상장일 필터
+        list_date = kiwoom.GetMasterListedStockDate(code)
+        list_dt = datetime.strptime(list_date, "%Y%m%d")
+        if (datetime.today() - list_dt).days < 20:
+            return None
+
+        # 수급 (기관/외국인)
+        supply = kiwoom.block_request(
+            "opt10059",
+            종목코드=code,
+            기준일자=today,
+            수정주가구분=1,
+            output="일별기관매매종목",
+            next=0
+        )
+        if supply is None or len(supply) < 3:
+            return None
+
+        inst_sum = sum(int(str(supply["기관합계"][i]).replace(",", "")) for i in range(3))
+        fore_sum = sum(int(str(supply["외국인합계"][i]).replace(",", "")) for i in range(3))
+        if inst_sum <= 0 and fore_sum <= 0:
+            return None
+
+        score = 0
+        if inst_sum > 0: score += 1
+        if fore_sum > 0: score += 1
+        if inst_sum + fore_sum > 1_000_000_000: score += 1
+
+        return {
+            "ticker": code,
+            "name": name,
+            "score": score,
+            "curr_price": curr_price,
+            "market_cap(억)": round(market_cap, 1),
+            "value": round(curr_value / 1e8, 1),
+            "volume": curr_vol
+        }
+
+    except Exception as e:
+        print(f"[ERROR] {code} 오류: {e}")
+        return None
+
+# ✅ 전체 실행
+def filter_all_stocks():
+    tickers = get_tickers()
+    results = []
+
+    for code in tickers:
+        result = check_conditions(code)
+        if result:
+            results.append(result)
+
+    df = pd.DataFrame(results)
+    df = df.sort_values(by="score", ascending=False)
+    df.to_csv("buy_list.csv", index=False, encoding="utf-8-sig")
+    print(f"✅ 필터링 완료 - 종목 수: {len(df)}")
+    return df
+
 if __name__ == "__main__":
-    filtered = get_filtered_stocks()
-    print(filtered)
-    filtered.to_csv("buy_list.csv", index=False, encoding="utf-8-sig")
+    filter_all_stocks()
