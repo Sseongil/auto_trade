@@ -1,22 +1,13 @@
 services:
-  - type: web # 서비스 타입: 웹 서비스
-    name: telegram-bot # 서비스 이름
-    env: python # 환경: Python
-    # 이 명령어는 requirements.txt 파일에서 의존성을 설치합니다.
+  - type: web
+    name: telegram-bot
+    env: python
     buildCommand: "pip install -r requirements.txt"
-    # startCommand를 수정하여 PYTHONPATH를 설정합니다.
-    # /opt/render/project/src는 Render에서 프로젝트 코드가 위치하는 기본 경로입니다.
-    # 이것을 PYTHONPATH에 추가하여 파이썬이 modules 폴더를 찾을 수 있도록 합니다.
-    startCommand: "PYTHONPATH=$PYTHONPATH:/opt/render/project/src python modules/server.py"
-    # 웹 서비스가 수신 대기할 포트 (Render는 PORT 환경 변수를 통해 제공)
+    startCommand: "cd /opt/render/project/src && python modules/server.py" # <<< This is the critical change
     envVars:
       - key: PORT
-        value: 10000 # Flask의 기본 포트, server.py가 다른 포트를 사용한다면 조정
-      # 보안을 위해 텔레그램 토큰과 채팅 ID를 환경 변수로 추가합니다!
-      # Render 대시보드에서 이 값들을 설정해야 합니다.
+        value: 10000
       - key: TELEGRAM_TOKEN
-        sync: false # Render의 Secret Files 기능을 사용한다면 true로 설정
+        sync: false
       - key: TELEGRAM_CHAT_ID
-        sync: false # Render의 Secret Files 기능을 사용한다면 true로 설정
-
-# Cron Job도 추가한다면 여기에 정의 (현재는 Web Service만)
+        sync: false
