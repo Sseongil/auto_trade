@@ -1,14 +1,13 @@
-# .render.yaml (수정된 전체 코드 - 한글 주석 추가)
 services:
   - type: web # 서비스 타입: 웹 서비스
     name: telegram-bot # 서비스 이름
     env: python # 환경: Python
     # 이 명령어는 requirements.txt 파일에서 의존성을 설치합니다.
-    # (예: C 확장 컴파일과 같은 복잡한 빌드 단계가 있다면 여기에 추가)
     buildCommand: "pip install -r requirements.txt"
-    # 이 명령어는 텔레그램 봇의 웹 서버를 시작합니다.
-    # 이 서버는 텔레그램 업데이트(메시지/명령어)를 수신 대기합니다.
-    startCommand: "python modules/server.py"
+    # startCommand를 수정하여 PYTHONPATH를 설정합니다.
+    # /opt/render/project/src는 Render에서 프로젝트 코드가 위치하는 기본 경로입니다.
+    # 이것을 PYTHONPATH에 추가하여 파이썬이 modules 폴더를 찾을 수 있도록 합니다.
+    startCommand: "PYTHONPATH=$PYTHONPATH:/opt/render/project/src python modules/server.py"
     # 웹 서비스가 수신 대기할 포트 (Render는 PORT 환경 변수를 통해 제공)
     envVars:
       - key: PORT
@@ -19,3 +18,5 @@ services:
         sync: false # Render의 Secret Files 기능을 사용한다면 true로 설정
       - key: TELEGRAM_CHAT_ID
         sync: false # Render의 Secret Files 기능을 사용한다면 true로 설정
+
+# Cron Job도 추가한다면 여기에 정의 (현재는 Web Service만)
