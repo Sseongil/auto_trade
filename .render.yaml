@@ -1,6 +1,21 @@
+# .render.yaml (수정된 전체 코드 - 한글 주석 추가)
 services:
-  - type: web
-    name: telegram-bot
-    env: python
-    buildCommand: ""
-    startCommand: python modules/server.py
+  - type: web # 서비스 타입: 웹 서비스
+    name: telegram-bot # 서비스 이름
+    env: python # 환경: Python
+    # 이 명령어는 requirements.txt 파일에서 의존성을 설치합니다.
+    # (예: C 확장 컴파일과 같은 복잡한 빌드 단계가 있다면 여기에 추가)
+    buildCommand: "pip install -r requirements.txt"
+    # 이 명령어는 텔레그램 봇의 웹 서버를 시작합니다.
+    # 이 서버는 텔레그램 업데이트(메시지/명령어)를 수신 대기합니다.
+    startCommand: "python modules/server.py"
+    # 웹 서비스가 수신 대기할 포트 (Render는 PORT 환경 변수를 통해 제공)
+    envVars:
+      - key: PORT
+        value: 10000 # Flask의 기본 포트, server.py가 다른 포트를 사용한다면 조정
+      # 보안을 위해 텔레그램 토큰과 채팅 ID를 환경 변수로 추가합니다!
+      # Render 대시보드에서 이 값들을 설정해야 합니다.
+      - key: TELEGRAM_TOKEN
+        sync: false # Render의 Secret Files 기능을 사용한다면 true로 설정
+      - key: TELEGRAM_CHAT_ID
+        sync: false # Render의 Secret Files 기능을 사용한다면 true로 설정

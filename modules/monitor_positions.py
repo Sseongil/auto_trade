@@ -1,4 +1,4 @@
-# modules/monitor_positions.py
+# modules/monitor_positions.py (UPDATED FULL CODE)
 
 import os
 import sys
@@ -6,9 +6,11 @@ import pandas as pd
 from datetime import datetime
 import logging
 
-# --- 필수 수정 1: __file__ 오타 수정 ---
+# --- 필수 수정 1: __file__ 오타 수정 및 경로 설정 ---
 # 현재 파일의 디렉토리를 sys.path에 추가하여 모듈을 올바르게 임포트할 수 있도록 합니다.
 # 이 설정은 프로젝트 구조에 따라 필요하며, IDE나 실행 환경에 따라 다를 수 있습니다.
+# 예를 들어, modules/monitor_positions.py에서 modules/notify.py를 임포트하려면
+# modules/ 디렉토리가 sys.path에 있어야 합니다.
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -21,10 +23,10 @@ from modules.config import (
     POSITIONS_FILE_PATH, DEFAULT_LOT_SIZE
 )
 
-# --- 권장 개선 2: 로깅 수준 제어 ---
-# logging.basicConfig는 애플리케이션 시작 시 한 번만 설정하는 것이 좋습니다.
-# 여기서는 단순히 logger 객체를 가져와서 사용하며, 설정은 다른 곳(예: 메인 실행 파일)에서 관리합니다.
+# --- 로깅 설정 ---
 logger = logging.getLogger(__name__)
+if not logger.handlers: # Avoid re-adding handlers if basicConfig is called elsewhere (e.g., in run_all.py)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
 # --- 도우미 함수 ---
@@ -79,7 +81,7 @@ def get_current_price(kiwoom_instance: Kiwoom, code: str) -> int:
         # 숫자인지 확인 후 변환, 아니면 0 반환
         return int(raw_price) if raw_price.isdigit() else 0
     except Exception as e:
-        logger.error(f"❌ 현재가 조회 실패: {code} - {e}")
+        logger.error(f"❌ 현재가 조회 실패: {code} - {e}", exc_info=True) # Stack trace 추가
         return 0
 
 def load_positions(file_path: str) -> pd.DataFrame:
@@ -109,7 +111,7 @@ def load_positions(file_path: str) -> pd.DataFrame:
         logger.warning(f"⚠️ 포지션 파일 비어있음: '{file_path}'. 빈 DataFrame을 반환합니다.")
         return pd.DataFrame(columns=list(cols.keys()))
     except Exception as e:
-        logger.error(f"❌ 포지션 파일 로딩 중 오류 발생: {file_path} - {e}. 빈 DataFrame을 반환합니다.")
+        logger.error(f"❌ 포지션 파일 로딩 중 오류 발생: {file_path} - {e}. 빈 DataFrame을 반환합니다.", exc_info=True)
         return pd.DataFrame(columns=list(cols.keys()))
 
     # 모든 예상 컬럼이 존재하는지 확인하고, 누락된 경우 기본값으로 채웁니다.
@@ -130,7 +132,7 @@ def load_positions(file_path: str) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
         elif dtype == bool:
             # 문자열 "True", 1, True 등은 True로, 나머지는 False로 변환
-            df[col] = df[col].apply(lambda x: str(x).lower() == 'true' or x == 1).fillna(False)
+            df[col] = df[col].apply(lambda x: str(x).lower() == 'true' or x == '1').fillna(False) # '1' 문자열도 인식하도록
         elif dtype == str:
             df[col] = df[col].fillna("").astype(str)
             
@@ -158,7 +160,7 @@ def save_positions(df: pd.DataFrame, file_path: str):
         df.to_csv(file_path, index=False, encoding="utf-8-sig", date_format="%Y-%m-%d")
         logger.info(f"✅ 포지션 {len(df)}개 저장 완료: '{file_path}'")
     except Exception as e:
-        logger.error(f"❌ 포지션 저장 중 오류 발생: {file_path} - {e}")
+        logger.error(f"❌ 포지션 저장 중 오류 발생: {file_path} - {e}", exc_info=True)
 
 # --- 메인 모니터링 로직 ---
 
@@ -174,6 +176,7 @@ def monitor_positions():
         kiwoom.CommConnect(block=True)
         if not kiwoom.connected:
             logger.critical("❌ 키움증권 API 연결 실패. 모니터링을 중단합니다.")
+            send_telegram_message("🚨 키움 API 연결 실패. 포지션 모니터링 중단.")
             return
         logger.info("✅ 키움증권 API 연결 성공.")
         account = kiwoom.GetLoginInfo("ACCNO")[0] # 연결된 계좌 번호 가져오기
@@ -186,7 +189,7 @@ def monitor_positions():
 
         updated_positions_list = [] # 처리 후 남은 포지션들을 저장할 리스트
 
-        for _, row in df_positions.iterrows():
+        for idx, row in df_positions.iterrows(): # idx도 함께 가져옴 (나중에 필요할 수 있으므로)
             # 각 포지션의 정보 추출 및 초기화
             code = str(row["ticker"]).zfill(6)
             name = row["name"]
@@ -195,13 +198,16 @@ def monitor_positions():
             trail_high = float(row["trail_high"])
             half_exited = bool(row["half_exited"])
             
-            current_row_dict = row.to_dict() # 현재 포지션의 딕셔너리 복사본
+            # DataFrame row를 딕셔너리로 변환하여 수정할 수 있도록 합니다.
+            # to_dict() 호출 시 copy=True를 명시하여 원본 DataFrame의 row에 영향을 주지 않도록 합니다.
+            current_row_dict = row.to_dict() # 수정된 부분: .copy() 대신 to_dict() 사용
 
             # 매수일자 처리 및 보유일 계산
             try:
+                # buy_date가 datetime 객체가 아닐 수 있으므로 str()로 변환 후 파싱
                 buy_date = datetime.strptime(str(row["buy_date"]), "%Y-%m-%d")
                 hold_days = (datetime.today() - buy_date).days
-            except ValueError as e: # 특정 예외(ValueError)를 명시적으로 잡습니다.
+            except ValueError as e:
                 logger.warning(f"❌ 날짜 형식 오류: {name}({code}) - buy_date: '{row['buy_date']}' - {e}. 해당 포지션은 건너뛰고 다음 주기에 다시 확인합니다.")
                 updated_positions_list.append(current_row_dict) # 오류 있는 포지션은 그대로 유지
                 continue # 다음 포지션으로 넘어감
@@ -209,7 +215,8 @@ def monitor_positions():
             # 수량이 0이거나 유효하지 않은 경우 로그 기록 후 건너뛰기
             if quantity <= 0:
                 logger.info(f"정보: {name}({code}) - 수량 0. 포지션 목록에서 제거합니다.")
-                log_trade(code, name, 0, 0, "수량0제거") # 기록 남기기
+                # log_trade 함수 호출 방식 변경: quantity와 trade_type 추가
+                log_trade(code, name, 0, 0, "ZERO_QUANTITY_REMOVE", None) # price 0, pnl None
                 continue # 다음 포지션으로 넘어감
 
             # 현재가 조회
@@ -234,9 +241,10 @@ def monitor_positions():
                     r = kiwoom.SendOrder("손절매도", "0101", account, 2, code, order_quantity, 0, "03", "") # 시장가 매도
                     if r == 0: # 주문 성공 시
                         send_telegram_message(f"❌ 손절: {name}({code}) | 수익률: {pnl_pct:.2f}% | 수량: {order_quantity}주")
-                        log_trade(code, name, current_price, pnl_pct, "손절")
+                        # log_trade 함수 호출 방식 변경: quantity와 trade_type 추가
+                        log_trade(code, name, current_price, order_quantity, "STOP_LOSS", pnl_pct)
                         action_taken = True
-                    else: # 주문 실패 시 (선택 개선 3: 응답 코드 설명 추가)
+                    else: # 주문 실패 시
                         error_msg = KIWOOM_ERROR_CODES.get(r, "알 수 없는 오류")
                         logger.error(f"🔴 손절 주문 실패: {name}({code}) 응답코드 {r} ({error_msg})")
                 else:
@@ -254,7 +262,8 @@ def monitor_positions():
                         r = kiwoom.SendOrder("익절매도(50%)", "0101", account, 2, code, half_qty, 0, "03", "") # 시장가 매도
                         if r == 0: # 주문 성공 시
                             send_telegram_message(f"🎯 50% 익절: {name}({code}) | 수익률: {pnl_pct:.2f}% | 수량: {half_qty}주")
-                            log_trade(code, name, current_price, pnl_pct, "익절50%")
+                            # log_trade 함수 호출 방식 변경: quantity와 trade_type 추가
+                            log_trade(code, name, current_price, half_qty, "TAKE_PROFIT_50", pnl_pct)
                             
                             # 포지션 데이터 업데이트: 남은 수량, half_exited 플래그, 추적 고점
                             current_row_dict["quantity"] -= half_qty
@@ -262,7 +271,7 @@ def monitor_positions():
                             current_row_dict["trail_high"] = current_price
                             logger.info(f"업데이트: {name}({code}) 남은 수량: {current_row_dict['quantity']}주, 추적고점: {current_row_dict['trail_high']:,}원")
                             action_taken = True
-                        else: # 주문 실패 시 (선택 개선 3: 응답 코드 설명 추가)
+                        else: # 주문 실패 시
                             error_msg = KIWOOM_ERROR_CODES.get(r, "알 수 없는 오류")
                             logger.error(f"🔴 50% 익절 주문 실패: {name}({code}) 응답코드 {r} ({error_msg})")
                     else:
@@ -283,9 +292,10 @@ def monitor_positions():
                         r = kiwoom.SendOrder("트레일링익절", "0101", account, 2, code, order_quantity, 0, "03", "") # 시장가 매도
                         if r == 0: # 주문 성공 시
                             send_telegram_message(f"📉 트레일링 스탑: {name}({code}) | 수익률: {pnl_on_exit:.2f}% | 수량: {order_quantity}주")
-                            log_trade(code, name, current_price, pnl_on_exit, "트레일링익절")
+                            # log_trade 함수 호출 방식 변경: quantity와 trade_type 추가
+                            log_trade(code, name, current_price, order_quantity, "TRAILING_STOP", pnl_on_exit)
                             action_taken = True
-                        else: # 주문 실패 시 (선택 개선 3: 응답 코드 설명 추가)
+                        else: # 주문 실패 시
                             error_msg = KIWOOM_ERROR_CODES.get(r, "알 수 없는 오류")
                             logger.error(f"🔴 트레일링 스탑 주문 실패: {name}({code}) 응답코드 {r} ({error_msg})")
                     else:
@@ -302,9 +312,10 @@ def monitor_positions():
                         r = kiwoom.SendOrder("보유종료매도", "0101", account, 2, code, order_quantity, 0, "03", "") # 시장가 매도
                         if r == 0: # 주문 성공 시
                             send_telegram_message(f"⌛ 보유일 초과 청산: {name}({code}) | 수익률: {pnl_on_exit:.2f}% | 수량: {order_quantity}주")
-                            log_trade(code, name, current_price, pnl_on_exit, "보유종료")
+                            # log_trade 함수 호출 방식 변경: quantity와 trade_type 추가
+                            log_trade(code, name, current_price, order_quantity, "MAX_HOLD_DAYS_SELL", pnl_on_exit)
                             action_taken = True
-                        else: # 주문 실패 시 (선택 개선 3: 응답 코드 설명 추가)
+                        else: # 주문 실패 시
                             error_msg = KIWOOM_ERROR_CODES.get(r, "알 수 없는 오류")
                             logger.error(f"🔴 보유일 초과 청산 주문 실패: {name}({code}) 응답코드 {r} ({error_msg})")
                     else:
@@ -322,6 +333,7 @@ def monitor_positions():
 
     except Exception as e:
         logger.critical(f"🚨 모니터링 중 치명적인 예외 발생: {e}", exc_info=True) # exc_info=True로 스택 트레이스 출력
+        send_telegram_message(f"🚨 포지션 모니터링 중 치명적 오류: {e}")
     finally:
         # Kiwoom 연결은 항상 종료되도록 보장
         if 'kiwoom' in locals() and kiwoom.connected: # kiwoom 객체가 생성되었고 연결된 경우에만 disconnect
@@ -330,8 +342,8 @@ def monitor_positions():
 
 if __name__ == "__main__":
     # 이 부분이 monitor_positions.py를 단독 실행할 때 로깅을 설정합니다.
-    # 만약 이 모듈이 다른 메인 스크립트에 의해 임포트되어 실행된다면,
+    # 만약 이 모듈이 다른 메인 스크립트(예: run_all.py)에 의해 임포트되어 실행된다면,
     # 메인 스크립트에서 logging.basicConfig를 한 번만 설정하는 것이 좋습니다.
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-    logger = logging.getLogger(__name__) # __name__으로 logger를 다시 가져옴
+    # logger = logging.getLogger(__name__) # __name__으로 logger를 다시 가져옴 (선택 사항)
     monitor_positions()

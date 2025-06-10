@@ -1,63 +1,103 @@
-# modules/report_generator.py
-
 import os
 import pandas as pd
 from datetime import datetime
+import logging
 from modules.notify import send_telegram_message
 
-def generate_text_summary():
-    # 오늘 날짜를 YYYYMMDD 형식으로 가져옵니다.
-    today = datetime.today().strftime("%Y%m%d")
-    # 백테스트 결과 파일의 전체 경로를 생성합니다.
-    file_path = os.path.join("data", today, f"backtest_result_{today}.csv") # f-string 사용으로 가독성 향상
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-    # 파일이 존재하는지 확인합니다.
+# --- 상수 선언 ---
+COL_RETURN = "수익률(%)"
+COL_RESULT = "결과"
+
+def generate_daily_trade_report() -> None:
+    today_str = datetime.today().strftime("%Y%m%d")
+    file_path = os.path.join("data", today_str, f"backtest_result_{today_str}.csv")
+    report_title = f"📈 [{today_str}] 일일 자동매매 리포트"
+
     if not os.path.exists(file_path):
-        print(f"❌ 백테스트 파일 없음: {file_path}") # f-string 사용
+        msg = f"❌ 리포트 생성 실패: 백테스트 파일 없음: '{file_path}'"
+        logger.warning(msg)
+        send_telegram_message(f"{report_title}\n{msg}")
         return
 
     try:
-        # CSV 파일을 데이터프레임으로 읽어옵니다.
-        df = pd.read_csv(file_path, encoding='utf-8-sig') # 한글 깨짐 방지를 위한 encoding 추가
+        df = pd.read_csv(file_path, encoding='utf-8-sig')
+        logger.info(f"📂 백테스트 파일 로드 성공: '{file_path}'")
+    except pd.errors.EmptyDataError:
+        msg = f"⚠️ 리포트 생성 경고: 백테스트 파일이 비어 있습니다: '{file_path}'"
+        logger.warning(msg)
+        send_telegram_message(f"{report_title}\n{msg}")
+        return
     except Exception as e:
-        print(f"❌ 백테스트 파일 읽기 오류: {e}")
+        msg = f"❌ 리포트 생성 오류: 백테스트 파일 읽기 실패: {e}"
+        logger.error(msg, exc_info=True)
+        send_telegram_message(f"{report_title}\n{msg}")
         return
 
-    # 데이터프레임이 비어있는지 확인합니다.
+    # --- 유효성 검사 ---
+    required_cols = ["종목명", COL_RETURN, COL_RESULT]
+    for col in required_cols:
+        if col not in df.columns:
+            msg = f"❌ 필수 컬럼 '{col}'이 누락되어 리포트를 생성할 수 없습니다."
+            logger.error(msg)
+            send_telegram_message(f"{report_title}\n{msg}")
+            return
+
+    try:
+        df[COL_RETURN] = pd.to_numeric(df[COL_RETURN], errors='coerce')
+        df.dropna(subset=[COL_RETURN], inplace=True)
+    except Exception as e:
+        msg = f"❌ '{COL_RETURN}' 숫자 변환 실패: {e}"
+        logger.error(msg, exc_info=True)
+        send_telegram_message(f"{report_title}\n{msg}")
+        return
+
     if df.empty:
-        print("📂 백테스트 결과 없음.")
+        msg = "📂 유효한 데이터가 없어 리포트를 생성할 수 없습니다."
+        logger.info(msg)
+        send_telegram_message(f"{report_title}\n{msg}")
         return
 
-    # 수익률이 0보다 큰 경우를 '승리'로 간주하여 승률을 계산합니다.
-    # df["수익률(%)"]가 숫자형인지 확인하는 과정 추가 가능 (예: pd.to_numeric)
-    win_rate = (df["수익률(%)"] > 0).mean() * 100
-    # 평균 수익률을 계산합니다.
-    avg_return = df["수익률(%)"].mean()
+    # --- 통계 계산 ---
+    total_trades = len(df)
+    total_profit_loss = df[COL_RETURN].sum()
+    avg_return = df[COL_RETURN].mean()
 
-    # 익절, 손절, 보유종료 건수를 정확하게 계산합니다.
-    # .str.contains() 대신 .eq()를 사용하는 것이 더 정확할 수 있습니다.
-    # 그러나 현재 컬럼 '결과'에 '익절', '손절', '보유종료'만 명확히 들어간다면 큰 문제는 없습니다.
-    # 다만, 문자열 내부에 해당 문자열이 포함된 경우도 True가 되므로,
-    # 정확한 문자열 일치를 원한다면 `df['결과'] == '익절'`과 같이 사용하는 것이 좋습니다.
-    num_profit = df[df["결과"] == "익절"].shape[0] # 정확한 일치로 변경
-    num_loss = df[df["결과"] == "손절"].shape[0]   # 정확한 일치로 변경
-    num_hold_end = df[df["결과"] == "보유종료"].shape[0] # 정확한 일치로 변경
+    win_trades = df[df[COL_RETURN] > 0]
+    num_wins = len(win_trades)
+    win_rate = (num_wins / total_trades) * 100 if total_trades > 0 else 0.0
 
+    num_profit = df[df[COL_RESULT] == "익절"].shape[0]
+    num_loss = df[df[COL_RESULT] == "손절"].shape[0]
+    num_hold_end = df[df[COL_RESULT] == "보유종료"].shape[0]
 
-    # 요약 메시지를 포맷팅합니다.
-    summary = (
-        f"📈 [{today}] 자동매매 요약\n"
-        f"총 종목 수: {len(df)}개\n"
-        f"▶ 평균 수익률: {avg_return:.2f}%\n"
-        f"▶ 승률: {win_rate:.2f}%\n"
-        f"▶ 익절: {num_profit}개\n"
-        f"▶ 손절: {num_loss}개\n"
-        f"▶ 보유종료: {num_hold_end}개"
+    avg_win_return = win_trades[COL_RETURN].mean() if num_wins > 0 else 0.0
+    loss_trades = df[df[COL_RETURN] <= 0]
+    num_losses = len(loss_trades)
+    avg_loss_return = loss_trades[COL_RETURN].mean() if num_losses > 0 else 0.0
+
+    # --- 리포트 생성 ---
+    summary_message = (
+        f"{report_title}\n"
+        f"------------------------------------\n"
+        f"📊 거래 요약\n"
+        f"  - 총 거래 횟수: {total_trades}회\n"
+        f"  - 총 수익률: {total_profit_loss:.2f}%\n"
+        f"  - 평균 수익률: {avg_return:.2f}%\n"
+        f"  - 승률: {win_rate:.2f}%\n"
+        f"------------------------------------\n"
+        f"📈 상세 결과\n"
+        f"  - 익절: {num_profit}회 (평균 수익: {avg_win_return:.2f}%)\n"
+        f"  - 손절: {num_loss}회 (평균 손실: {avg_loss_return:.2f}%)\n"
+        f"  - 보유종료: {num_hold_end}회\n"
+        f"------------------------------------"
     )
-    
-    # 요약 메시지를 콘솔에 출력하고 텔레그램으로 전송합니다.
-    print(summary)
-    send_telegram_message(summary)
+
+    logger.info("\n" + summary_message + "\n")
+    send_telegram_message(summary_message)
 
 if __name__ == "__main__":
-    generate_text_summary()
+    generate_daily_trade_report()
