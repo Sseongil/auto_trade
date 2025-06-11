@@ -23,7 +23,7 @@ DEFAULT_LOT_SIZE = 1
 # --- 텔레그램 알림 설정 ---
 # ✅ 환경 변수에서 값 로드. 없으면 하드코딩된 기본값 사용 (보안상 환경 변수 사용 강력 권장)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE") # 텔레그램 봇 토큰
-TELEGRAM_CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID", 0)) # 메시지를 받을 채팅 ID (개인 채팅 또는 그룹 채팅 ID), int 변환 필수!
+TELEGRAM_CHAT_ID = int(os.environ.get("1866728370", 0)) # 메시지를 받을 채팅 ID (개인 채팅 또는 그룹 채팅 ID), int 변환 필수!
 
 
 # --- 매수 수량 계산 함수 ---
