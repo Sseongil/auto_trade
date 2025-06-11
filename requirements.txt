@@ -6,3 +6,4 @@ pykiwoom==0.1.1 ; sys_platform == "win32" # 키움증권 API 연동 (Windows에�
 # 부가적이지만 필요한 경우 (선택)
 python-dotenv==1.0.0             # .env 환경변수 관리
 requests
+gunicorn
