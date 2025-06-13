@@ -1,13 +1,15 @@
+# render.yaml 예시 (이미 render.yaml을 사용 중이라면 해당 서비스 정의 내에 추가)
 services:
   - type: web
-    name: telegram-bot
+    name: your-telegram-bot # 서비스 이름
     env: python
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "cd /opt/render/project/src && python modules/server.py" # <<< This is the critical change
+    buildCommand: "./build.sh" # 빌드 스크립트 실행
+    startCommand: "python your_bot_app.py" # 봇 시작 명령
     envVars:
-      - key: PORT
-        value: 10000
-      - key: TELEGRAM_TOKEN
+      - key: LOCAL_API_SERVER_URL
         sync: false
-      - key: TELEGRAM_CHAT_ID
-        sync: false
+    # ... 다른 설정들 ...
+    build:
+      # pip 캐시를 위한 경로 설정
+      cache:
+        - path: /.cache/pip
