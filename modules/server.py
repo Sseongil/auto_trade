@@ -1,175 +1,171 @@
-from flask import Flask, request, jsonify
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
-from telegram import Bot
-import requests # 이전에 추가했습니다.
-import json
 import os
+import requests
+import json
 import logging
+from telegram import Bot
+from dotenv import load_dotenv
+
+# .env 파일 로드
+load_dotenv()
+
+# 환경 변수 설정
+LOCAL_API_SERVER_URL = os.getenv("LOCAL_API_SERVER_URL")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID") # 단일 채팅 ID만 사용한다고 가정
 
 # 로깅 설정
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- config 모듈 임포트 (상대 경로 유지) ---
-from .config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, LOCAL_API_SERVER_URL
+# 텔레그램 봇 초기화
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-app = Flask(__name__)
-bot = Bot(token=TELEGRAM_TOKEN)
-
-# 텔레그램 업데이트 처리
-def handle_telegram_updates(update):
-    if update.message:
-        chat_id = update.message.chat_id
-        text = update.message.text
-        logger.info(f"Received message from {chat_id}: {text}")
-
-        # 봇에게 명령이 왔을 때만 처리 (예: /status, /trade)
-        if text.startswith('/'):
-            if text == '/status':
-                send_status_to_telegram(chat_id)
-            elif text == '/trade':
-                toggle_trade_status_and_notify(chat_id)
-            else:
-                bot.send_message(chat_id=chat_id, text="알 수 없는 명령어입니다. /status 또는 /trade 를 사용해주세요.")
-        else:
-            # 봇이 특정 명령이 아닌 일반 메시지에 응답할 필요가 없다면 비워둘 수 있습니다.
-            pass
-    elif update.callback_query:
-        # 콜백 쿼리 처리 (예: 인라인 키보드 버튼 클릭)
-        query = update.callback_query
-        query.answer() # 콜백 쿼리에 대한 응답
-        chat_id = query.message.chat_id
-        data = query.data
-        logger.info(f"Received callback query from {chat_id}: {data}")
-
-        if data == 'toggle_trade_status':
-            toggle_trade_status_and_notify(chat_id)
-        # 다른 콜백 데이터 처리
-
-# 텔레그램으로 현재 상태 요청 및 전송
+# --- 텔레그램으로 상태 전송 함수 ---
 def send_status_to_telegram(chat_id):
     if not LOCAL_API_SERVER_URL:
-        bot.send_message(chat_id=chat_id, text="⚠️ LOCAL_API_SERVER_URL이 설정되지 않았습니다. Render 환경 변수를 확인해주세요.")
+        logger.error("LOCAL_API_SERVER_URL 환경 변수가 설정되지 않았습니다.")
+        bot.send_message(chat_id=chat_id, text="❌ 서버 설정 오류: LOCAL_API_SERVER_URL이 설정되지 않았습니다.")
         return
 
+    logger.info(f"로컬 API 서버에 상태 요청: {LOCAL_API_SERVER_URL}/status")
     try:
-        # Windows PC의 로컬 API 서버로 /status 요청
-        logger.info(f"Requesting status from local API server: {LOCAL_API_SERVER_URL}/status")
-        response = requests.get(f"{LOCAL_API_SERVER_URL}/status")
-        response.raise_for_status() # HTTP 오류가 발생하면 예외 발생
+        # ✅ requests.get 호출에 명시적인 타임아웃 추가 (로컬 서버의 10초 타임아웃보다 길게 설정)
+        response = requests.get(f"{LOCAL_API_SERVER_URL}/status", timeout=15) # 15초 타임아웃 설정
+        response.raise_for_status() # HTTP 오류 (4xx, 5xx) 발생 시 예외 발생
 
         status_data = response.json()
+        
+        # 데이터 유효성 검사 및 기본값 설정
+        trade_status = status_data.get('trade_status', '확인불가')
+        total_buy_amount = status_data.get('total_buy_amount', 0)
+        total_eval_amount = status_data.get('total_eval_amount', 0)
+        total_profit_loss = status_data.get('total_profit_loss', 0)
+        total_profit_loss_rate = status_data.get('total_profit_loss_rate', 0.0)
+        positions = status_data.get('positions', [])
 
-        # 상태 데이터가 있다면 메시지 생성
-        if status_data:
-            message = "📊 **현재 자동매매 상태** 📊\n\n"
-            message += f"매매 스위치: `{status_data.get('trade_status', '알 수 없음')}`\n"
-            message += f"총 매수 금액: `{status_data.get('total_buy_amount', 0):,}원`\n"
-            message += f"총 평가 금액: `{status_data.get('total_eval_amount', 0):,}원`\n"
-            message += f"총 평가 손익: `{status_data.get('total_profit_loss', 0):,}원`\n"
-            message += f"총 수익률: `{status_data.get('total_profit_loss_rate', 0):.2f}%`\n"
-            message += f"보유 종목 수: `{len(status_data.get('positions', []))}`개\n"
+        message = (
+            f"🤖 **현재 자동매매 상태**: `{trade_status}`\n"
+            f"💰 **총 매입 금액**: `{total_buy_amount:,}원`\n"
+            f"📈 **총 평가 금액**: `{total_eval_amount:,}원`\n"
+            f"📊 **총 평가 손익**: `{total_profit_loss:,}원`\n"
+            f"🎯 **총 수익률**: `{total_profit_loss_rate:.2f}%`\n\n"
+        )
 
-            # 보유 종목 상세 정보 (최대 5개까지)
-            if status_data.get('positions'):
-                message += "\n**보유 종목:**\n"
-                for i, pos in enumerate(status_data['positions']):
-                    if i >= 5: # 너무 길어지지 않게 최대 5개만 표시
-                        message += f"... 외 {len(status_data['positions']) - 5}개 더\n"
-                        break
-                    message += f"- {pos['stock_name']}: {pos['current_price']:,}원 (수익률: {pos['profit_loss_rate']:.2f}%)\n"
-            else:
-                message += "\n보유 종목이 없습니다."
-
-            bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+        if positions:
+            message += "📊 **보유 종목**:\n"
+            for p in positions:
+                stock_name = p.get('stock_name', 'N/A')
+                current_price = p.get('current_price', 0)
+                profit_loss_rate = p.get('profit_loss_rate', 0.0)
+                message += f"- `{stock_name}`: 현재가 `{current_price:,}원`, 수익률 `{profit_loss_rate:.2f}%`\n"
         else:
-            bot.send_message(chat_id=chat_id, text="Windows API 서버로부터 상태 데이터를 가져오는 데 실패했습니다.")
+            message += "📈 보유 종목 없음.\n"
 
+        bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+        logger.info(f"상태 정보를 텔레그램 채팅 {chat_id}에 성공적으로 전송했습니다.")
+
+    except requests.exceptions.Timeout:
+        logger.error("로컬 API 서버 요청 시간 초과 (15초).")
+        bot.send_message(chat_id=chat_id, text="❌ 로컬 API 서버 응답 시간 초과 (15초). Kiwoom HTS 및 서버 상태를 확인해주세요.")
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP 오류 발생: {e.response.status_code} - {e.response.text}")
+        bot.send_message(chat_id=chat_id, text=f"❌ 로컬 API 서버에서 HTTP 오류 발생: `{e.response.status_code}`. 서버 로그를 확인해주세요.")
     except requests.exceptions.ConnectionError as e:
-        logger.error(f"Windows API 서버 연결 실패: {e}")
-        bot.send_message(chat_id=chat_id, text=f"❌ Windows API 서버와 통신할 수 없습니다.\n(오류: {e})")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Windows API 서버 요청 오류: {e}")
-        bot.send_message(chat_id=chat_id, text=f"⚠️ Windows API 서버 요청 중 오류가 발생했습니다.\n(오류: {e})")
+        logger.error(f"로컬 API 서버 연결 오류: {e}. ngrok 터널이 활성화되어 있는지 확인하세요.")
+        bot.send_message(chat_id=chat_id, text=f"❌ 로컬 API 서버에 연결할 수 없습니다. ngrok 터널이 활성화되어 있는지 확인해주세요.")
+    except json.JSONDecodeError as e:
+        logger.error(f"로컬 API 서버 응답 JSON 파싱 오류: {e}. 응답 텍스트: {response.text if 'response' in locals() else 'N/A'}")
+        bot.send_message(chat_id=chat_id, text="❌ 로컬 API 서버 응답 형식 오류. 서버 로그를 확인해주세요.")
     except Exception as e:
-        logger.error(f"상태 전송 중 알 수 없는 오류 발생: {e}")
-        bot.send_message(chat_id=chat_id, text=f"알 수 없는 오류가 발생했습니다: {e}")
+        logger.error(f"send_status_to_telegram 함수에서 예상치 못한 오류 발생: {e}", exc_info=True)
+        bot.send_message(chat_id=chat_id, text=f"❌ 상태 전송 중 예상치 못한 오류 발생: `{e}`")
 
-# 매매 스위치 토글 및 알림
-def toggle_trade_status_and_notify(chat_id):
-    if not LOCAL_API_SERVER_URL:
-        bot.send_message(chat_id=chat_id, text="⚠️ LOCAL_API_SERVER_URL이 설정되지 않았습니다. Render 환경 변수를 확인해주세요.")
+# --- 텔레그램 웹훅 처리 함수 ---
+def handle_telegram_updates(update):
+    # 'message' 객체 내부에 'text' 필드가 있는지 확인
+    if 'message' not in update or 'text' not in update['message']:
+        logger.warning("받은 업데이트에 메시지 텍스트가 없습니다. 스킵합니다.")
         return
 
-    try:
-        # 현재 상태를 먼저 가져와서 토글할 값 결정
-        logger.info(f"Requesting current status to toggle from local API server: {LOCAL_API_SERVER_URL}/status")
-        response_get = requests.get(f"{LOCAL_API_SERVER_URL}/status")
-        response_get.raise_for_status()
-        current_status_data = response_get.json()
-        current_trade_status = current_status_data.get('trade_status', 'stop') # 기본값 'stop'
+    chat_id = update['message']['chat']['id']
+    user_message = update['message']['text']
+    logger.info(f"Received message from {chat_id}: {user_message}")
 
-        new_trade_status = 'start' if current_trade_status == 'stop' else 'stop'
+    if str(chat_id) != CHAT_ID: # 환경변수에 설정된 CHAT_ID와 일치하는지 확인
+        logger.warning(f"허용되지 않은 사용자 ({chat_id})의 메시지: {user_message}")
+        bot.send_message(chat_id=chat_id, text="죄송합니다. 이 봇은 허용된 사용자만 접근할 수 있습니다.")
+        return
 
-        # Windows PC의 로컬 API 서버로 /trade 요청 (상태 변경)
-        logger.info(f"Sending toggle request to local API server: {LOCAL_API_SERVER_URL}/trade with status: {new_trade_status}")
-        response_post = requests.post(f"{LOCAL_API_SERVER_URL}/trade", json={"status": new_trade_status})
-        response_post.raise_for_status()
-
-        result = response_post.json()
-        message = f"자동매매 스위치가 `{new_trade_status}`로 변경되었습니다. (서버 응답: {result.get('message', 'N/A')})"
-        bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
-
-    except requests.exceptions.ConnectionError as e:
-        logger.error(f"Windows API 서버 연결 실패 (토글): {e}")
-        bot.send_message(chat_id=chat_id, text=f"❌ Windows API 서버와 통신할 수 없어 상태를 변경할 수 없습니다.\n(오류: {e})")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Windows API 서버 요청 오류 (토글): {e}")
-        bot.send_message(chat_id=chat_id, text=f"⚠️ Windows API 서버 요청 중 오류가 발생했습니다 (토글).\n(오류: {e})")
-    except Exception as e:
-        logger.error(f"토글 중 알 수 없는 오류 발생: {e}")
-        bot.send_message(chat_id=chat_id, text=f"알 수 없는 오류가 발생했습니다 (토글): {e}")
-
-# Flask 앱의 웹훅 처리 (Render에서 텔레그램으로부터 메시지를 받는 곳)
-# 이 부분을 /webhook 경로로 변경했습니다.
-@app.route('/webhook', methods=['POST']) # <-- 이 줄이 수정되었습니다.
-def webhook():
-    if request.method == 'POST':
-        update = request.get_json()
-        logger.info(f"Received webhook update: {update}")
-        # 텔레그램 업데이트 객체를 직접 처리
+    if user_message == '/status':
+        send_status_to_telegram(chat_id)
+    elif user_message == '/start_trade':
+        logger.info(f"로컬 API 서버에 매매 시작 요청: {LOCAL_API_SERVER_URL}/trade")
         try:
-            from telegram import Update
-            update_obj = Update.de_json(update, bot)
-            handle_telegram_updates(update_obj)
+            # ✅ requests.post 호출에도 타임아웃 적용
+            response = requests.post(f"{LOCAL_API_SERVER_URL}/trade", json={"status": "start"}, timeout=10) # 10초 타임아웃
+            response.raise_for_status()
+            result = response.json()
+            bot.send_message(chat_id=chat_id, text=f"✅ {result.get('message', '매매 시작 요청 완료')}")
+            logger.info(f"매매 시작 요청 성공: {result}")
+        except requests.exceptions.Timeout:
+            logger.error("로컬 API 서버 요청 시간 초과 (10초) - /start_trade.")
+            bot.send_message(chat_id=chat_id, text="❌ 로컬 API 서버 응답 시간 초과 (10초). Kiwoom HTS 및 서버 상태를 확인해주세요.")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"로컬 API 서버 통신 오류 - /start_trade: {e}")
+            bot.send_message(chat_id=chat_id, text=f"❌ 매매 시작 요청 중 오류 발생: {e}")
         except Exception as e:
-            logger.error(f"Error handling Telegram update: {e}")
-            # 오류 발생 시 텔레그램으로 메시지 보낼 수 있으나, 무한 루프 위험 있으므로 주의
-            # bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"봇 처리 중 오류 발생: {e}")
+            logger.error(f"예상치 못한 오류 발생 - /start_trade: {e}")
+            bot.send_message(chat_id=chat_id, text=f"❌ 예상치 못한 오류 발생: {e}")
 
-        return jsonify({'status': 'ok'})
-    return jsonify({'status': 'bad request'}), 400
+    elif user_message == '/stop_trade':
+        logger.info(f"로컬 API 서버에 매매 중지 요청: {LOCAL_API_SERVER_URL}/trade")
+        try:
+            # ✅ requests.post 호출에도 타임아웃 적용
+            response = requests.post(f"{LOCAL_API_SERVER_URL}/trade", json={"status": "stop"}, timeout=10) # 10초 타임아웃
+            response.raise_for_status()
+            result = response.json()
+            bot.send_message(chat_id=chat_id, text=f"✅ {result.get('message', '매매 중지 요청 완료')}")
+            logger.info(f"매매 중지 요청 성공: {result}")
+        except requests.exceptions.Timeout:
+            logger.error("로컬 API 서버 요청 시간 초과 (10초) - /stop_trade.")
+            bot.send_message(chat_id=chat_id, text="❌ 로컬 API 서버 응답 시간 초과 (10초). Kiwoom HTS 및 서버 상태를 확인해주세요.")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"로컬 API 서버 통신 오류 - /stop_trade: {e}")
+            bot.send_message(chat_id=chat_id, text=f"❌ 매매 중지 요청 중 오류 발생: {e}")
+        except Exception as e:
+            logger.error(f"예상치 못한 오류 발생 - /stop_trade: {e}")
+            bot.send_message(chat_id=chat_id, text=f"❌ 예상치 못한 오류 발생: {e}")
+    else:
+        bot.send_message(chat_id=chat_id, text="알 수 없는 명령어입니다. `/status`, `/start_trade`, `/stop_trade` 중 하나를 입력해주세요.")
 
-# 서비스가 시작될 때 텔레그램으로 알림
-# Render가 이 엔드포인트를 호출하도록 설정되어 있어야 합니다.
-@app.route('/notify_startup', methods=['GET'])
-def notify_startup():
-    try:
-        # TELEGRAM_CHAT_ID가 유효한지 확인
-        if not TELEGRAM_CHAT_ID or TELEGRAM_CHAT_ID == 0:
-            logger.warning("TELEGRAM_CHAT_ID is not set or is 0. Skipping startup notification.")
-            return jsonify({'status': 'warning', 'message': 'TELEGRAM_CHAT_ID is not set'})
 
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="🚀 자동매매 봇이 Render에서 성공적으로 시작되었습니다!")
-        logger.info("Startup notification sent.")
-        return jsonify({'status': 'ok', 'message': 'Startup notification sent'})
-    except Exception as e:
-        logger.error(f"Failed to send startup notification: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+# Flask 앱 인스턴스 (Render 배포용)
+from flask import Flask, request as flask_request # request 이름 충돌 방지
+app = Flask(__name__)
 
-if __name__ == "__main__":
-    # Gunicorn 사용 시 이 부분은 직접 실행되지 않습니다.
-    # Render의 시작 명령어 (Start Command)는 'gunicorn modules.server:app' 입니다.
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if flask_request.method == "POST":
+        update_obj = flask_request.get_json()
+        logger.info(f"Received webhook update: {update_obj}")
+        # 새 스레드에서 업데이트 처리 (웹훅 응답 시간을 빠르게 하기 위함)
+        threading.Thread(target=handle_telegram_updates, args=(update_obj,)).start()
+        return "ok", 200 # 텔레그램 서버에 즉시 응답
+
+# Render 시작 시 웹훅 설정 (옵션)
+# Render 환경에서는 웹훅 URL이 계속 바뀌지 않으므로, 이 부분을 Build Command에 넣거나,
+# 최초 1회만 수동으로 설정하는 것이 일반적입니다.
+# 매번 앱 시작 시마다 설정할 필요는 없습니다.
+# def set_webhook():
+#     webhook_url = f"YOUR_RENDER_SERVICE_URL/webhook" # Render 서비스의 실제 URL
+#     try:
+#         set_webhook_response = bot.set_webhook(url=webhook_url)
+#         logger.info(f"Webhook 설정 응답: {set_webhook_response}")
+#     except Exception as e:
+#         logger.error(f"웹훅 설정 오류: {e}")
+
+# if __name__ == '__main__':
+#     # 로컬에서 테스트할 때는 run() 함수를 사용하고, Render에서는 Gunicorn이 이 파일을 실행합니다.
+#     # Render에서는 __name__ == '__main__' 블록이 실행되지 않습니다.
+#     # set_webhook() # 필요하다면 여기서 웹훅을 설정할 수 있습니다.
+#     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
