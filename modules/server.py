@@ -4,6 +4,7 @@ import json
 import logging
 from telegram import Bot
 from dotenv import load_dotenv
+import threading
 
 # .env 파일 로드
 load_dotenv()
