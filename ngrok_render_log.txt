@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "C:\Users\user\stock_auto\run_ngrok_and_update_render.py", line 76, in <module>
+    print("\U0001f680 자동화 시작: ngrok 주소 → Render 환경 변수 → 재배포")
+UnicodeEncodeError: 'cp949' codec can't encode character '\U0001f680' in position 0: illegal multibyte sequence
