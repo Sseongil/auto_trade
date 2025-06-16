@@ -10,8 +10,8 @@ from datetime import datetime
 import logging
 
 # ✅ 임포트 경로 수정됨: common 폴더 안의 config와 utils
-from ..common.config import POSITIONS_FILE_PATH, DEFAULT_LOT_SIZE
-from ..common.utils import get_current_time_str
+from modules.common.config import POSITIONS_FILE_PATH, DEFAULT_LOT_SIZE
+from modules.common.utils import get_current_time_str
 
 logger = logging.getLogger(__name__)
 

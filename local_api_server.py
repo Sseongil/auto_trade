@@ -17,12 +17,14 @@ if modules_path not in sys.path:
     sys.path.insert(0, modules_path)  # 우선순위 부여
 
 # 패키지 경로에 맞게 import 수정
-from Kiwoom.kiwoom_query_helper import KiwoomQueryHelper
-from Kiwoom.kiwoom_tr_request import KiwoomTrRequest
-from Kiwoom.monitor_positions import MonitorPositions
-from Kiwoom.trade_manager import TradeManager
-from common.utils import get_current_time_str # common 폴더로 이동했으므로 수정
-from common.config import get_env # common 폴더로 이동했으므로 수정
+from modules.Kiwoom.kiwoom_query_helper import KiwoomQueryHelper
+from modules.Kiwoom.kiwoom_tr_request import KiwoomTrRequest
+from modules.Kiwoom.monitor_positions import MonitorPositions
+from modules.Kiwoom.trade_manager import TradeManager
+from modules.common.utils import get_current_time_str # common 폴더로 이동했으므로 수정
+from modules.common.config import get_env # common 폴더로 이동했으므로 수정
+from modules.notify import send_telegram_message
+from modules.trade_logger import log_trade
 
 # Flask 앱 초기화
 app = Flask(__name__)

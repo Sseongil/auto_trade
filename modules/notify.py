@@ -5,7 +5,7 @@ import logging
 # config.py에서 TELEGRAM_BOT_TOKEN과 TELEGRAM_CHAT_ID를 가져옵니다.
 # 주의: 이 값들은 config.py에서 정의되어야 합니다.
 # .env 파일에 TELEGRAM_BOT_TOKEN으로 명명되어 있으므로, 이에 맞춰 수정합니다.
-from modules.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from modules.common.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
 # 로깅 설정: 기본 로깅 설정은 애플리케이션 시작 시 한 번만 하는 것이 좋습니다.
 # 여기서는 다른 모듈에서 이미 basicConfig가 설정되어 있을 경우, 핸들러를 추가하지 않도록 합니다.

@@ -7,25 +7,24 @@ import logging
 from datetime import datetime
 
 # ✅ 임포트 경로 수정됨: common 폴더 안의 config와 utils
-from ..common.config import POSITIONS_FILE_PATH, STOP_LOSS_PCT, TAKE_PROFIT_PCT, TRAIL_STOP_PCT, MAX_HOLD_DAYS, DEFAULT_LOT_SIZE
-from ..common.utils import get_current_time_str
+from modules.common.config import POSITIONS_FILE_PATH, STOP_LOSS_PCT, TAKE_PROFIT_PCT, TRAIL_STOP_PCT, MAX_HOLD_DAYS, DEFAULT_LOT_SIZE
+from modules.common.utils import get_current_time_str
 
 # 필요한 경우, notify와 trade_logger 모듈을 modules 폴더에 추가해야 합니다.
 # 없으면 이 줄들을 주석 처리하거나 빈 더미 함수로 대체해야 합니다.
 try:
-    from ..notify import send_telegram_message # modules/notify.py
+    from modules.notify import send_telegram_message # 기존: from ..notify
 except ImportError:
     logging.warning("modules/notify.py not found. Telegram notifications will be disabled.")
     def send_telegram_message(message):
         logging.info(f"Telegram (simulated): {message}")
 
 try:
-    from ..trade_logger import log_trade # modules/trade_logger.py
+    from modules.trade_logger import log_trade # 기존: from ..trade_logger
 except ImportError:
     logging.warning("modules/trade_logger.py not found. Trade logging will be disabled.")
     def log_trade(code, name, price, quantity, trade_type, pnl=None):
         logging.info(f"Trade Log (simulated): {trade_type} - {name}({code}), Qty: {quantity}, Price: {price}, PnL: {pnl}")
-
 
 logger = logging.getLogger(__name__)
 

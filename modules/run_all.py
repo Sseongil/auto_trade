@@ -16,7 +16,7 @@ if not logger.handlers:
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-from modules.monitor_positions import monitor_positions
+from modules.Kiwoom.monitor_positions import MonitorPositions
 from modules.real_time_watcher import run_watcher
 from modules.check_conditions_threaded import run_filter
 from modules.report_generator import generate_daily_trade_report
