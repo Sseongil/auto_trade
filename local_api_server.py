@@ -1,176 +1,199 @@
-from flask import Flask, jsonify, request
+# C:\Users\user\stock_auto\local_api_server.py
+
 import os
-import logging
-import traceback
-import pandas as pd
-from pykiwoom.kiwoom import *
-import time
-import threading
+import sys
+import json
+import requests
+from flask import Flask, request, jsonify
+from dotenv import load_dotenv # .env 파일 로드를 위해 추가
 
-# 로깅 설정
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# .env 로드
+load_dotenv()
 
+# 현재 스크립트 기준 modules 경로 추가
+script_dir = os.path.dirname(os.path.abspath(__file__))
+modules_path = os.path.join(script_dir, 'modules')
+if modules_path not in sys.path:
+    sys.path.insert(0, modules_path)  # 우선순위 부여
+
+# 패키지 경로에 맞게 import 수정
+from Kiwoom.kiwoom_query_helper import KiwoomQueryHelper
+from Kiwoom.kiwoom_tr_request import KiwoomTrRequest
+from Kiwoom.monitor_positions import MonitorPositions
+from Kiwoom.trade_manager import TradeManager
+from common.utils import get_current_time_str # common 폴더로 이동했으므로 수정
+from common.config import get_env # common 폴더로 이동했으므로 수정
+
+# Flask 앱 초기화
 app = Flask(__name__)
 
-# --- 키움 API 전역 상태 ---
-kiwoom = None
-connected = False
-account_number = None
-trade_status = "stop"
+# 글로벌 인스턴스
+kiwoom_helper = None
+kiwoom_tr_request = None
+trade_manager = None
+monitor_positions = None
+app_initialized = False
 
-# --- 타임아웃 처리 함수 ---
-def run_with_timeout(target_func, args=(), kwargs={}, timeout=10):
-    result = {}
-    error_occurred = False
-
-    def wrapper():
-        nonlocal error_occurred
-        try:
-            result["value"] = target_func(*args, **kwargs)
-        except Exception as e:
-            result["error"] = str(e)
-            error_occurred = True
-            logger.error(f"Error in target_func '{target_func.__name__}': {e}")
-            logger.error(traceback.format_exc())
-
-    thread = threading.Thread(target=wrapper)
-    thread.start()
-    thread.join(timeout)
-
-    if thread.is_alive():
-        logger.warning(f"Function '{target_func.__name__}' timed out after {timeout} seconds.")
-        return None, "timeout"
-    
-    if error_occurred:
-        return None, result.get("error", "Unknown error.")
-        
-    return result.get("value", None), None
-
-# --- Kiwoom 초기화 ---
 def initialize_kiwoom_api():
-    global kiwoom, connected, account_number
-    logger.info("Initializing Kiwoom API...")
+    global kiwoom_helper, kiwoom_tr_request, trade_manager, monitor_positions, app_initialized
+
+    if app_initialized:
+        print("INFO: Kiwoom API already initialized.")
+        return True
 
     try:
-        kiwoom = Kiwoom()
-        kiwoom.CommConnect()
-        time.sleep(5)
+        # .env 파일에서 계좌번호 로드
+        accounts_str = get_env("ACCOUNT_NUMBERS")
+        print(f"DEBUG: ACCOUNT_NUMBERS from env: {accounts_str}")
 
-        if kiwoom.GetConnectState() == 1:
-            connected = True
-            accounts_raw = kiwoom.GetLoginInfo("ACCNO")
-            logger.info(f"accounts_raw from Kiwoom: {accounts_raw} (type: {type(accounts_raw)})")
+        account_number = None
+        if isinstance(accounts_str, str):
+            # 쉼표로 구분된 계좌번호 중 첫 번째 사용
+            account_number = accounts_str.split(',')[0].strip() if accounts_str else None
+        
+        if not account_number:
+            print("ERROR: No valid account number found from .env or GetLoginInfo.")
+            # 이 단계에서 계좌번호를 못 찾으면, 실제 키움 연결 후 GetLoginInfo로 다시 시도
+            # (아래 kiwoom_helper.connect_kiwoom() 후 호출)
+            pass
 
-            if isinstance(accounts_raw, str):
-                account_number = accounts_raw.split(';')[0]
-            elif isinstance(accounts_raw, list):
-                account_number = accounts_raw[0]
+        # Python COM 초기화 (멀티쓰레딩 환경 고려)
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+        except pythoncom.com_error as e:
+            if e.hresult != -2147417850: # RPC_E_CHANGED_MODE
+                raise e
+
+        kiwoom_helper = KiwoomQueryHelper()
+        if not kiwoom_helper.connect_kiwoom():
+            print("ERROR: Failed to connect to Kiwoom.")
+            # 연결 실패 시 CoUninitialize 필요
+            pythoncom.CoUninitialize()
+            return False
+
+        # 키움 연결 성공 후, GetLoginInfo로 계좌번호 가져오기 (만약 .env에 없었다면)
+        if not account_number:
+            accounts_from_kiwoom = kiwoom_helper.ocx.GetLoginInfo("ACCNO")
+            if accounts_from_kiwoom:
+                account_number = accounts_from_kiwoom.split(';')[0].strip()
+                print(f"INFO: Using account number from Kiwoom API: {account_number}")
             else:
-                account_number = None
-                logger.warning("No valid account number found.")
+                print("ERROR: Could not retrieve account number from Kiwoom API.")
+                kiwoom_helper.disconnect_kiwoom()
+                pythoncom.CoUninitialize()
+                return False
 
-            logger.info(f"✅ Connected to Kiwoom API. Using account number: {account_number}")
-        else:
-            connected = False
-            logger.error("❌ Failed to connect to Kiwoom API.")
+        kiwoom_tr_request = KiwoomTrRequest(kiwoom_helper)
+        
+        # monitor_positions와 trade_manager 초기화 시 account_number 인자 전달
+        monitor_positions = MonitorPositions(kiwoom_helper, kiwoom_tr_request, account_number) # kiwoom_tr_request 인자 추가
+        trade_manager = TradeManager(kiwoom_helper, kiwoom_tr_request, monitor_positions, account_number) # monitor_positions 인자 추가
+
+        app_initialized = True
+        print("INFO: Kiwoom API initialized successfully.")
+        return True
+
     except Exception as e:
-        connected = False
-        logger.error(f"Error initializing Kiwoom API: {e}")
-        logger.error(traceback.format_exc())
+        print(f"CRITICAL ERROR during Kiwoom API initialization: {e}")
+        # 예외 발생 시 CoUninitialize 시도 (연결이 되었을 수도 있으므로)
+        if kiwoom_helper:
+            kiwoom_helper.disconnect_kiwoom()
+        try:
+            pythoncom.CoUninitialize()
+        except Exception as e_uninit:
+            print(f"WARNING: Error during CoUninitialize: {e_uninit}")
+        return False
 
-@app.route('/status', methods=['GET'])
+@app.route('/')
+def home():
+    return "Local API Server is running!"
+
+@app.route('/status')
 def get_status():
-    global connected, account_number, trade_status
-
-    if not connected:
-        return jsonify({"status": "error", "message": "키움 API 연결되지 않음"}), 503
-
-    if not account_number:
-        return jsonify({"status": "error", "message": "계좌번호 없음"}), 503
-
+    if not app_initialized:
+        return jsonify({"status": "error", "message": "Kiwoom API not initialized"}), 503
     try:
-        def request_opw00004_tr():
-            return kiwoom.block_request("opw00004",
-                                        계좌번호=account_number,
-                                        비밀번호="",
-                                        상장폐지구분=0,
-                                        비밀번호입력매체구분="00",
-                                        거래소구분="KRX",
-                                        output="계좌평가현황",
-                                        next=0)
+        # 계좌 정보 요청 로직 수정
+        # account_number는 initialize_kiwoom_api에서 이미 설정됨
+        if not kiwoom_helper or not kiwoom_tr_request:
+             return jsonify({"status": "error", "message": "Kiwoom helper or TR request not available."}), 500
 
-        account_info, err = run_with_timeout(request_opw00004_tr, timeout=10)
-        time.sleep(0.2)
-
-        if err:
-            return jsonify({"status": "error", "message": f"opw00004 실패: {err}"}), 500
-
-        if isinstance(account_info, pd.DataFrame) and not account_info.empty:
-            account_data = account_info.iloc[0].to_dict()
-        elif isinstance(account_info, dict):
-            account_data = account_info
-        else:
-            return jsonify({"status": "error", "message": "계좌정보 데이터 형식 오류"}), 500
-
-        def request_opw00018_tr():
-            return kiwoom.block_request("opw00018",
-                                        계좌번호=account_number,
-                                        비밀번호="",
-                                        조회구분=1,
-                                        비밀번호입력매체구분="00",
-                                        거래소구분="KRX",
-                                        output="종목별계좌평가현황",
-                                        next=0)
-
-        stock_info, err2 = run_with_timeout(request_opw00018_tr, timeout=10)
-        time.sleep(0.2)
-
-        positions = []
-        if isinstance(stock_info, pd.DataFrame):
-            for _, row in stock_info.iterrows():
-                positions.append({
-                    "stock_name": row.get("종목명", "N/A").strip(),
-                    "current_price": int(row.get("현재가", 0)),
-                    "profit_loss_rate": float(row.get("수익률%", 0.0))
-                })
-        elif isinstance(stock_info, list):
-            for item in stock_info:
-                if isinstance(item, dict):
-                    positions.append({
-                        "stock_name": item.get("종목명", "N/A").strip(),
-                        "current_price": int(item.get("현재가", 0)),
-                        "profit_loss_rate": float(item.get("수익률%", 0.0))
-                    })
-
+        # local_api_server.py에서 initialize_kiwoom_api를 통해 account_number가 설정된다고 가정
+        # (monitor_positions 또는 trade_manager가 이미 account_number를 가지고 있을 것이므로)
+        # 여기서는 편의상 monitor_positions.account_number를 사용합니다.
+        account_info = kiwoom_tr_request.request_account_info(monitor_positions.account_number)
+        
+        positions = monitor_positions.get_current_positions() # 실제 Kiwoom API에서 가져오도록 변경 예정
+        
         return jsonify({
-            "trade_status": trade_status,
-            "total_buy_amount": int(account_data.get("총매입금액", 0)),
-            "total_eval_amount": int(account_data.get("총평가금액", 0)),
-            "total_profit_loss": int(account_data.get("총평가손익금액", 0)),
-            "total_profit_loss_rate": float(account_data.get("총수익률", 0.0)),
-            "positions": positions
+            "status": "ok",
+            "account_info": account_info,
+            "positions": positions,
+            "current_time": get_current_time_str()
         })
-
     except Exception as e:
-        logger.error(traceback.format_exc())
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"status": "error", "message": f"Failed to retrieve status: {e}"}), 500
 
-@app.route('/trade', methods=['POST'])
-def toggle_trade():
-    global connected, trade_status
-
-    if not connected:
-        return jsonify({"status": "error", "message": "키움 API 연결되지 않음"}), 503
+@app.route('/buy', methods=['POST'])
+def buy_stock():
+    if not app_initialized:
+        return jsonify({"status": "error", "message": "Kiwoom API not initialized."}), 503
 
     data = request.get_json()
-    if data and data.get("status") in ["start", "stop"]:
-        trade_status = data["status"]
-        return jsonify({"status": "success", "message": f"매매 상태를 '{trade_status}'로 설정했습니다."})
-    return jsonify({"status": "error", "message": "status 값이 start 또는 stop 이어야 합니다."}), 400
+    stock_code = data.get('stock_code')
+    order_type = data.get('order_type', '지정가') # "00" 지정가, "03" 시장가
+    price = data.get('price', 0)
+    quantity = data.get('quantity')
 
-if __name__ == "__main__":
+    if not all([stock_code, quantity]):
+        return jsonify({"status": "error", "message": "Missing stock_code or quantity"}), 400
+
+    try:
+        # order_type 인자를 실제 키움 API에 맞는 형식으로 변환 (1:매수)
+        order_type_kiwoom = 1 # 매수
+        hoga_gb = "00" if order_type == "지정가" else "03" # 00: 지정가, 03: 시장가
+
+        result = trade_manager.place_order(stock_code, order_type_kiwoom, quantity, price, hoga_gb)
+        
+        # 주문 성공 시 monitor_positions 업데이트 (TradeManager에서 처리하도록 변경됨)
+        # monitor_positions.update_position(stock_code, quantity, price) # 이미 TradeManager에서 처리
+        
+        return jsonify({"status": "success", "message": "Buy order placed", "result": result}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to place buy order: {e}"}), 500
+
+@app.route('/sell', methods=['POST'])
+def sell_stock():
+    if not app_initialized:
+        return jsonify({"status": "error", "message": "Kiwoom API not initialized."}), 503
+
+    data = request.get_json()
+    stock_code = data.get('stock_code')
+    order_type = data.get('order_type', '지정가')
+    price = data.get('price', 0)
+    quantity = data.get('quantity')
+
+    if not all([stock_code, quantity]):
+        return jsonify({"status": "error", "message": "Missing stock_code or quantity"}), 400
+
+    try:
+        # order_type 인자를 실제 키움 API에 맞는 형식으로 변환 (2:매도)
+        order_type_kiwoom = 2 # 매도
+        hoga_gb = "00" if order_type == "지정가" else "03" # 00: 지정가, 03: 시장가
+
+        result = trade_manager.place_order(stock_code, order_type_kiwoom, quantity, price, hoga_gb)
+        
+        # 주문 성공 시 monitor_positions 업데이트 (TradeManager에서 처리하도록 변경됨)
+        # monitor_positions.update_position(stock_code, -quantity, price) # 이미 TradeManager에서 처리
+        
+        return jsonify({"status": "success", "message": "Sell order placed", "result": result}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to place sell order: {e}"}), 500
+
+if __name__ == '__main__':
+    print("Local API Server starting...")
     initialize_kiwoom_api()
-    port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Flask 서버 시작 - 포트 {port}")
-    app.run(host="0.0.0.0", port=port, debug=True)
+    # Flask 서버 포트를 .env에서 가져오도록 수정
+    API_SERVER_PORT = int(get_env("PORT", "5000")) 
+    app.run(host='0.0.0.0', port=API_SERVER_PORT, debug=True, use_reloader=False)
