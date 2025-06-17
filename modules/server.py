@@ -1,14 +1,14 @@
 # modules/server.py
 import os
 import sys
-import json  # json 모듈은 requests.post(json=payload)에서 간접적으로 사용될 수 있지만 명시적으로 임포트
+import json
 import logging
-import asyncio # 비동기 함수 사용을 위해 명시적으로 임포트
-import requests # HTTP 요청을 위해 명시적으로 임포트
+import asyncio
+import requests
 
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
-from telegram import Update, Bot # Bot 클래스도 set_webhook 등에 필요할 수 있으므로 유지
+from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # --- 초기 설정 ---
@@ -17,7 +17,6 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(script_dir, '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-    # logger.info(f"Added project root to sys.path: {project_root}") # 디버깅용
 
 import modules.common.config as config
 from modules.common.config import get_env
@@ -267,22 +266,26 @@ async def process_trade_command(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         args = context.args
         if not (2 <= len(args) <= 3):
-            raise ValueError(f"사용법: `/{trade_type} [종목코드] [수량] [가격(선택)]`\n예시: `/{trade_type} 005930 10 70000` (지정가)\n예시: `/{trade_type} 005930 5` (시장가)")
+            await update.message.reply_markdown_v2(f"❌ 사용법: `/{trade_type} [종목코드] [수량] [가격(선택)]`\n예시: `/{trade_type} 005930 10 70000` (지정가)\n예시: `/{trade_type} 005930 5` (시장가)")
+            return
         
         stock_code = args[0].strip()
         if not stock_code.isdigit() or len(stock_code) != 6:
-             raise ValueError("유효한 6자리 종목코드여야 합니다.")
+            await update.message.reply_markdown_v2("❌ 종목코드는 6자리 숫자여야 합니다.")
+            return
 
         quantity = int(args[1])
         if quantity <= 0:
-            raise ValueError("수량은 0보다 큰 정수여야 합니다.")
+            await update.message.reply_text("❌ 수량은 0보다 큰 정수여야 합니다.")
+            return
         
         price = 0 # 시장가 기본값
         order_type = "시장가"
         if len(args) == 3:
             price = int(args[2])
             if price < 0:
-                raise ValueError("가격은 음수일 수 없습니다.")
+                await update.message.reply_text("❌ 가격은 음수일 수 없습니다.")
+                return
             order_type = "지정가"
 
         # 로컬 API 서버 URL 검증
