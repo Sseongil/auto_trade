@@ -138,7 +138,7 @@ def detect_and_notify_ngrok():
                         render_update_endpoint, 
                         json={"new_url": https_url}, 
                         headers=headers,
-                        timeout=10 # 타임아웃 추가
+                        timeout=30 # 타임아웃 추가
                     )
                     update_response.raise_for_status()
                     logger.info(f"✅ Render 서버 응답: {update_response.status_code} - {update_response.text}")
@@ -277,8 +277,40 @@ def sell():
         logger.exception(f"매도 실패: Stock Code: {stock_code}, Qty: {quantity}, Price: {price}, Type: {order_type}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+import threading
+import time as time_module
+
+def background_trading_loop():
+    """PC 부팅 후 자동 조건검색 → 자동매수 루프 실행"""
+    from modules.auto_trade import run_auto_trade
+    from modules.check_conditions import run_all_stock_conditions_filter
+
+    while True:
+        now = datetime.now()
+        if time(8, 50) <= now.time() <= time(15, 20):  # 장 시작 직전부터 종료까지 수행
+            try:
+                logger.info("🧠 조건검색 실행 시작")
+                run_all_stock_conditions_filter(verbose=False)
+                logger.info("🎯 조건검색 완료")
+
+                time_module.sleep(10)  # 잠깐 대기 후 매수 루프 시작
+
+                logger.info("🤖 자동매수 루프 실행 시작")
+                run_auto_trade()
+                logger.info("🤖 자동매수 루프 종료")
+
+            except Exception as e:
+                logger.exception(f"🔥 자동매매 루프 중 오류 발생: {e}")
+        else:
+            logger.info("🕰️ 현재 시간은 매매 시간대가 아닙니다. 5분 후 재확인.")
+        
+        time_module.sleep(300)  # 5분마다 반복
+
 # --- 서버 실행 ---
 if __name__ == '__main__':
+        # 백그라운드에서 조건검색 및 자동매매 루프 시작
+    threading.Thread(target=background_trading_loop, daemon=True).start()
+
     logger.info("📡 Local API Server 시작 중...")
     if not initialize_kiwoom_api():
         sys.exit(1)
