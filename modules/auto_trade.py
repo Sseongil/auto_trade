@@ -13,7 +13,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # 필요한 모듈 임포트
 from pykiwoom.kiwoom import Kiwoom
-from modules.trade_manager import add_position
+from modules.position_manager import add_position_to_csv as add_position
 from modules.notify import send_telegram_message
 from modules.trade_logger import log_trade # <-- 이 모듈의 함수 호출 방식을 변경할 예정
 from modules.config import calculate_quantity, STATUS_FILE_PATH, BUY_LIST_DIR_PATH # config.py에서 경로 가져오기

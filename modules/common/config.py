@@ -35,10 +35,10 @@ if not os.path.exists(DATA_DIR):
     print(f"📁 data 디렉토리 생성됨: {DATA_DIR}")
 
 # --- 전략 설정 ---
-STOP_LOSS_PCT = float(get_env("STOP_LOSS_PCT", "-2.0"))       # 손절 기준 (%)
-TAKE_PROFIT_PCT = float(get_env("TAKE_PROFIT_PCT", "5.0"))    # 익절 기준 (%)
-TRAIL_STOP_PCT = float(get_env("TRAIL_STOP_PCT", "1.0"))      # 트레일링 스탑 (%)
-MAX_HOLD_DAYS = int(get_env("MAX_HOLD_DAYS", "3"))            # 최대 보유일 (일)
+STOP_LOSS_PCT = float(get_env("STOP_LOSS_PCT", "-1.2"))
+TAKE_PROFIT_PCT = float(get_env("TAKE_PROFIT_PCT", "2.0"))
+TRAIL_STOP_PCT = float(get_env("TRAIL_STOP_PCT", "0.8"))
+MAX_HOLD_DAYS = int(get_env("MAX_HOLD_DAYS", "3"))     # 트레일링 스탑 (%)         # 최대 보유일 (일)
 
 # --- 수수료/세금 관련 설정 ---
 BUY_FEE_RATE = 0.00015           # 매수 수수료 (0.015%)
