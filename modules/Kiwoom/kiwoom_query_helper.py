@@ -1,60 +1,87 @@
-# C:\Users\user\stock_auto\modules\Kiwoom\kiwoom_query_helper.py
+# modules/Kiwoom/kiwoom_query_helper.py
 
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QAxContainer import QAxWidget
-from PyQt5.QtCore import QEventLoop
 import sys
 import logging
-from modules.common.utils import get_current_time_str
+# QApplication과 QAxWidget은 이제 local_api_server에서 직접 관리하여 주입받습니다.
+# 따라서 이 파일 내에서는 이들을 직접 임포트하지 않습니다.
+# from PyQt5.QtWidgets import QApplication
+# from PyQt5.QAxContainer import QAxWidget
+from modules.common.utils import get_current_time_str 
 
 logger = logging.getLogger(__name__)
 
 class KiwoomQueryHelper:
-    def __init__(self):
-        self.app = QApplication(sys.argv)  # GUI 이벤트 루프 필요
-        self.ocx = QAxWidget("KHOPENAPI.KHOpenAPICtrl.1")
+    # __init__ 메서드는 ocx_instance (QAxWidget)와 pyqt_app_instance (QApplication)를 인자로 받습니다.
+    def __init__(self, ocx_instance, pyqt_app_instance):
+        self.ocx = ocx_instance # 외부에서 생성된 QAxWidget 인스턴스를 받습니다.
+        self.pyqt_app = pyqt_app_instance # 외부에서 생성된 QApplication 인스턴스를 받습니다.
+        
+        self.connected_state = -1 # 초기 상태: 미접속 (0: 연결 성공)
+        
+        # OnEventConnect 이벤트 핸들러 연결
+        self.ocx.OnEventConnect.connect(self._on_event_connect)
+        
+        # 로그인 이벤트 루프는 주입받은 pyqt_app 인스턴스를 사용합니다.
+        self.login_event_loop = self.pyqt_app 
+        logger.info(f"{get_current_time_str()}: KiwoomQueryHelper initialized.")
 
-        # 로그인 상태
-        self.login_loop = QEventLoop()
-        self.login_success = False
-
-        # 이벤트 핸들러 연결
-        self.ocx.OnEventConnect.connect(self._on_login)
-
-    def _on_login(self, err_code):
+    def _on_event_connect(self, err_code):
+        """
+        키움 API 로그인 연결 상태 변경 시 호출되는 이벤트 핸들러.
+        """
+        self.connected_state = err_code # 연결 상태 업데이트
         if err_code == 0:
-            logger.info("[✅] 로그인 성공")
-            self.login_success = True
+            logger.info(f"[{get_current_time_str()}]: [✅] 로그인 성공")
         else:
-            logger.error(f"[❌] 로그인 실패 - 에러 코드: {err_code}")
-        self.login_loop.quit()
+            logger.error(f"[{get_current_time_str()}]: [❌] 로그인 실패 (에러 코드: {err_code})")
+        
+        # 로그인 이벤트 루프가 실행 중이라면 종료 (블로킹 해제)
+        if self.login_event_loop.isRunning():
+            self.login_event_loop.exit()
 
     def connect_kiwoom(self):
+        """
+        키움증권 API에 연결을 시도합니다.
+        """
+        if self.ocx.dynamicCall("GetConnectState()") == 0:
+            logger.info("✅ 키움 API 이미 연결됨.")
+            self.connected_state = 0 # 이미 연결되어 있으면 상태를 0으로 설정
+            return True
+
         logger.info("✅ 키움 API 로그인 시도 중...")
+        # CommConnect() 호출 (로그인 시도)
         self.ocx.dynamicCall("CommConnect()")
-        self.login_loop.exec_()  # 로그인 응답 대기
-
-        return self.login_success
-
-    def get_account_info(self):
-        acc_no = self.ocx.dynamicCall("GetLoginInfo(QString)", "ACCNO")
-        user_id = self.ocx.dynamicCall("GetLoginInfo(QString)", "USER_ID")
-        user_name = self.ocx.dynamicCall("GetLoginInfo(QString)", "USER_NAME")
-        return {
-            "계좌번호": acc_no.strip().split(';')[0],
-            "사용자ID": user_id.strip(),
-            "사용자명": user_name.strip()
-        }
-
-    def get_code_list_by_market(self, market):
-        data = self.ocx.dynamicCall("GetCodeListByMarket(QString)", market)
-        return data.split(';')[:-1]
-
-    def get_master_code_name(self, code):
-        return self.ocx.dynamicCall("GetMasterCodeName(QString)", code)
-
-    def get_login_info(self, tag):
-        return self.ocx.dynamicCall("GetLoginInfo(QString)", tag)
+        
+        # 로그인 성공/실패 응답을 기다리기 위해 이벤트 루프 실행
+        # _on_event_connect에서 이벤트 루프를 종료합니다.
+        self.login_event_loop.exec_()
+        
+        if self.connected_state == 0: # 로그인 성공
+            return True
+        else:
+            logger.critical(f"❌ Kiwoom API 연결 실패 (에러 코드: {self.connected_state})")
+            return False
 
     def disconnect_kiwoom(self):
-        logger.info("🔌 연결 종료 (별도 지원 없음)")
+        """
+        키움증권 API 연결을 종료합니다.
+        """
+        if self.ocx.dynamicCall("GetConnectState()") == 1: # 연결되어 있다면
+            logger.info("🔌 연결 종료 (별도 지원 없음)")
+            self.connected_state = -1 # 상태 업데이트
+        else:
+            logger.info("🔌 이미 연결되지 않은 상태입니다.")
+
+    def get_login_info(self, tag):
+        """
+        로그인 정보를 요청합니다 (예: "ACCNO" for 계좌번호).
+        """
+        return self.ocx.dynamicCall("GetLoginInfo(QString)", tag)
+
+    def get_stock_name(self, stock_code):
+        """종목 코드를 이용해 종목명을 가져옵니다."""
+        name = self.ocx.dynamicCall("GetMasterCodeName(QString)", stock_code)
+        if not name:
+            logger.warning(f"종목명 조회 실패: {stock_code}")
+            return "Unknown"
+        return name
