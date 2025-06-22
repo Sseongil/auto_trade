@@ -1,28 +1,29 @@
 @echo off
 setlocal
 
-:: Python 경로 (가상환경)
+:: Python 실행 경로 (가상환경 또는 시스템 Python)
 set PYTHON_PATH=C:\Users\user\stock_auto\venv\Scripts\python.exe
-:: 프로젝트 경로
+
+:: 프로젝트 루트
 set PROJECT_DIR=C:\Users\user\stock_auto
 
 cd /d %PROJECT_DIR%
 
 echo.
-echo --- Local API Server 실행 중 ---
+echo [1] --- Flask Local API 서버 실행 ---
 start "Local API Server" cmd /k %PYTHON_PATH% local_api_server.py
-timeout /t 10 >nul
+timeout /t 12 >nul
 
 echo.
-echo --- ngrok 실행 중 ---
-start "ngrok" cmd /k "C:\ngrok\ngrok.exe" http 5000
+echo [2] --- ngrok 실행 ---
+start "Ngrok" cmd /k "C:\ngrok\ngrok.exe" http 5000"
 timeout /t 15 >nul
 
 echo.
-echo --- Render 환경변수 동기화 및 재배포 ---
+echo [3] --- Render 환경변수 동기화 ---
 chcp 65001 >nul
 start "Render Sync" cmd /k %PYTHON_PATH% run_ngrok_and_update_render.py
 
 echo.
-echo --- 자동화 완료 ---
+echo [✅] 모든 자동화 프로세스 시작 완료
 pause
