@@ -157,7 +157,7 @@ def initialize_kiwoom_api_in_background_thread():
         
         with shared_state_lock:
             shared_kiwoom_state["account_number"] = account_number
-            time_module.sleep(15)  # 로그인 후 계좌 요청까지 대기
+            time_module.sleep(5)  # 로그인 후 계좌 요청까지 대기
             account_info = kiwoom_tr_request_thread.request_account_info(account_number)
             shared_kiwoom_state["balance"] = account_info.get("예수금", 0)
             shared_kiwoom_state["positions"] = monitor_positions_thread.get_all_positions() 
@@ -191,8 +191,8 @@ def background_trading_loop():
         logger.critical("❌ 백그라운드 트레이딩 스레드 초기화 실패. 스레드를 종료합니다.")
         return 
 
-    logger.info("Ngrok 터널 활성화를 위해 5초 대기...")
-    time_module.sleep(5)
+    logger.info("Ngrok 터널 활성화를 위해 15초 대기...")
+    time_module.sleep(15)
     
     try:
         ngrok_port = get_env("NGROK_API_PORT", "4040")

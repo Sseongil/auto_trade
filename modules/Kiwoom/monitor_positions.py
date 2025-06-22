@@ -312,7 +312,8 @@ class MonitorPositions:
         logger.info("🚀 포지션 모니터링 시작 (전략 기반)")
 
         # 키움 API 연결은 local_api_server에서 이미 되어있다고 가정
-        if not self.kiwoom_helper.connected_state == 0: # 0: 연결 성공
+        # 수정된 코드
+        if not self.kiwoom_helper.is_connected():
              logger.critical("❌ 키움증권 API 연결 안됨. 모니터링을 중단합니다.")
              send_telegram_message("🚨 키움 API 연결 실패. 포지션 모니터링 중단.")
              return
