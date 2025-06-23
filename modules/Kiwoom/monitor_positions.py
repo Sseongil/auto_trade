@@ -114,3 +114,63 @@ class MonitorPositions:
                 logger.info(f"Position for {stock_code} removed from monitoring.")
             else:
                 logger.warning(f"Attempted to remove non-existent position: {stock_code}. No action taken.")
+
+    def sync_local_positions(self, api_holdings: list):
+        """
+        키움 API에서 가져온 보유 종목 리스트 (opw00018 결과)와 로컬 positions.json을 동기화합니다.
+        API 데이터에 기반하여 로컬 데이터를 업데이트하고, 불필요한 로컬 포지션을 정리합니다.
+        Args:
+            api_holdings (list): kiwoom_tr_request.request_daily_account_holdings()의 결과.
+                                 각 항목은 dict이며 "stock_code", "name", "quantity" 등을 포함.
+        """
+        with self.position_lock:
+            updated_local_positions = {}
+            current_time_str = get_current_time_str()
+
+            for api_item in api_holdings:
+                stock_code = api_item["stock_code"]
+                item_name = api_item["name"]
+                api_quantity = api_item["quantity"]
+                api_purchase_price = api_item.get("purchase_price", 0.0)
+                api_total_purchase_amount = api_item.get("total_purchase_amount", 0.0)
+                api_current_price = api_item.get("current_price", 0.0)
+
+                if stock_code in self.positions:
+                    local_pos = self.positions[stock_code]
+                    local_pos["quantity"] = api_quantity
+                    local_pos["purchase_price"] = api_purchase_price
+                    local_pos["total_purchase_amount"] = api_total_purchase_amount
+                    local_pos["trail_high"] = max(local_pos.get("trail_high", 0.0), api_current_price)
+                    local_pos["last_update"] = current_time_str
+                    updated_local_positions[stock_code] = local_pos
+                    logger.debug(f"Sync: Updated local position for {stock_code} from API.")
+                else:
+                    new_pos = {
+                        "quantity": api_quantity,
+                        "purchase_price": api_purchase_price,
+                        "total_purchase_amount": api_total_purchase_amount,
+                        "buy_date": datetime.today().strftime("%Y-%m-%d"), 
+                        "buy_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+                        "half_exited": False, 
+                        "trail_high": api_current_price, 
+                        "name": item_name,
+                        "last_update": current_time_str
+                    }
+                    updated_local_positions[stock_code] = new_pos
+                    logger.info(f"Sync: Added new position {stock_code} ({item_name}) from API to local.")
+            
+            keys_to_remove = []
+            for stock_code, local_pos in self.positions.items():
+                if stock_code not in updated_local_positions and local_pos["quantity"] == 0:
+                    keys_to_remove.append(stock_code)
+                    logger.info(f"Sync: Removed zero-quantity local position for {stock_code} (not in API holdings).")
+                elif stock_code not in updated_local_positions and local_pos["quantity"] > 0:
+                    logger.warning(f"Sync: Local position {stock_code} (Qty: {local_pos['quantity']}) exists but not found in API holdings. This might indicate an issue.")
+            
+            for key in keys_to_remove:
+                if key in self.positions:
+                    del self.positions[key]
+
+            self.positions = updated_local_positions 
+            self.save_positions()
+            logger.info(f"Sync: Local positions synchronized. Total {len(self.positions)} positions remaining.")

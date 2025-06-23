@@ -79,3 +79,10 @@ class KiwoomQueryHelper:
             logger.warning(f"종목명 조회 실패: {stock_code}")
             return "Unknown"
         return name
+
+    def CommGetData(self, tr_code, record_name, item_name, index):
+        return self.ocx.CommGetData(tr_code, record_name, index, item_name)
+
+    def GetRepeatCnt(self, tr_code, record_name):
+        return self.ocx.GetRepeatCnt(tr_code, record_name)
+

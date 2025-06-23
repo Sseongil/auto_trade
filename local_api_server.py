@@ -9,7 +9,6 @@ from datetime import datetime, time
 import threading
 import time as time_module
 
-# QApplication과 QAxWidget 임포트 (이 파일에서 직접 생성 및 주입)
 from PyQt5.QtWidgets import QApplication 
 from PyQt5.QAxContainer import QAxWidget 
 
@@ -50,9 +49,16 @@ shared_kiwoom_state = {
 shared_state_lock = threading.Lock() 
 
 # --- API 키 보안 인증 ---
-LOCAL_API_KEY = get_env("LOCAL_API_KEY")
-if not LOCAL_API_KEY:
-    logger.critical("❌ LOCAL_API_KEY 환경 변수 미설정 - 서버 종료")
+# 💡 Render 서버로 보낼 API 키로 INTERNAL_API_KEY 사용
+RENDER_UPDATE_API_KEY = get_env("INTERNAL_API_KEY") 
+if not RENDER_UPDATE_API_KEY:
+    logger.critical("❌ INTERNAL_API_KEY 환경 변수 미설정 - 서버 종료")
+    sys.exit(1)
+
+# 이전에 사용하던 LOCAL_API_KEY는 /status 엔드포인트 인증에 계속 사용
+LOCAL_API_KEY_FOR_STATUS = get_env("LOCAL_API_KEY")
+if not LOCAL_API_KEY_FOR_STATUS:
+    logger.critical("❌ LOCAL_API_KEY 환경 변수 미설정 (Flask status용) - 서버 종료")
     sys.exit(1)
 
 def api_key_required(f):
@@ -60,7 +66,8 @@ def api_key_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         api_key = request.headers.get('X-API-Key')
-        if api_key and api_key == LOCAL_API_KEY:
+        # 💡 /status 엔드포인트는 LOCAL_API_KEY_FOR_STATUS로 인증
+        if api_key and api_key == LOCAL_API_KEY_FOR_STATUS:
             return f(*args, **kwargs)
         else:
             logger.warning(f"❌ 인증 실패 - 유효하지 않은 API 키: {request.remote_addr}")
@@ -77,8 +84,8 @@ def initialize_kiwoom_api_in_background_thread():
     kiwoom_tr_request_thread = None
     monitor_positions_thread = None
     trade_manager_thread = None
-    pyqt_app = None # QApplication 인스턴스를 저장할 변수
-    kiwoom_ocx = None # QAxWidget 인스턴스를 저장할 변수
+    pyqt_app = None 
+    kiwoom_ocx = None 
 
     try:
         import pythoncom
@@ -103,8 +110,7 @@ def initialize_kiwoom_api_in_background_thread():
 
         kiwoom_helper_thread = KiwoomQueryHelper(kiwoom_ocx, pyqt_app) 
 
-        # connect_kiwoom 호출 시 타임아웃 인자를 명시적으로 전달 (기본 30초, 필요 시 조절)
-        if not kiwoom_helper_thread.connect_kiwoom(timeout_ms=60000): # 예를 들어, 60초로 늘림
+        if not kiwoom_helper_thread.connect_kiwoom(timeout_ms=60000): 
             logger.critical("❌ Kiwoom API 연결 실패 (백그라운드 트레이딩 스레드)")
             send_telegram_message("❌ Kiwoom API 연결 실패. 자동 매매 중단됨.")
             if kiwoom_helper_thread: 
@@ -116,6 +122,8 @@ def initialize_kiwoom_api_in_background_thread():
             return False, None, None, None, None
 
         account_number = get_env("ACCOUNT_NUMBERS", "").split(',')[0].strip()
+        account_password = get_env("ACCOUNT_PASSWORD", "") 
+        
         if not account_number:
             account_number_from_api = kiwoom_helper_thread.get_login_info("ACCNO")
             if account_number_from_api:
@@ -131,7 +139,7 @@ def initialize_kiwoom_api_in_background_thread():
                 logger.warning(f"CoUninitialize 중 오류 발생: {e_uninit}")
             return False, None, None, None, None
 
-        kiwoom_tr_request_thread = KiwoomTrRequest(kiwoom_helper_thread, pyqt_app) 
+        kiwoom_tr_request_thread = KiwoomTrRequest(kiwoom_helper_thread, pyqt_app, account_password) 
         
         logger.info(f"💡 Kiwoom API 초기화에 사용될 계좌번호: '{account_number}'")
 
@@ -144,20 +152,17 @@ def initialize_kiwoom_api_in_background_thread():
         with shared_state_lock:
             shared_kiwoom_state["account_number"] = account_number
             
-            # 계좌 정보 초기 조회 및 오류 처리 강화
-            account_info = kiwoom_tr_request_thread.request_account_info(account_number, timeout_ms=30000) # TR 요청에도 타임아웃 추가
+            account_info = kiwoom_tr_request_thread.request_account_info(account_number, timeout_ms=30000) 
             
-            if account_info and not account_info.get("error"): # 계좌 정보가 유효하고 오류가 없을 경우
+            if account_info and not account_info.get("error"): 
                 shared_kiwoom_state["balance"] = account_info.get("예수금", 0)
                 logger.info(f"💰 초기 계좌 잔고: {shared_kiwoom_state['balance']} KRW")
             else:
                 error_msg = account_info.get("error", "알 수 없는 계좌 정보 조회 오류") if account_info else "계좌 정보 조회 결과 없음"
                 logger.critical(f"❌ 계좌 정보 초기 조회 실패: {error_msg}")
                 send_telegram_message(f"❌ 자동 매매 시작 실패: 계좌 정보 조회 실패. {error_msg}")
-                # 계좌 정보 조회 실패 시 초기화 실패로 간주하고 종료
                 return False, None, None, None, None 
 
-            shared_kiwoom_state["positions"] = monitor_positions_thread.get_all_positions() 
             shared_kiwoom_state["last_update_time"] = get_current_time_str()
 
         global app_initialized
@@ -173,7 +178,7 @@ def initialize_kiwoom_api_in_background_thread():
         try:
             pythoncom.CoUninitialize()
         except Exception as e_uninit:
-            logger.warning(f"CoUninitialize 중 오류 발생: {e_uninit}")
+                logger.warning(f"CoUninitialize 중 오류 발생: {e_uninit}")
         return False, None, None, None, None
 
 
@@ -209,7 +214,8 @@ def background_trading_loop():
                     logger.info(f"🌐 Render 서버로 ngrok URL 업데이트 요청 중: {render_update_endpoint}")
                     headers = {
                         'Content-Type': 'application/json',
-                        'X-Internal-API-Key': LOCAL_API_KEY 
+                        # 💡 Render 서버로 보낼 API 키로 INTERNAL_API_KEY 값 사용
+                        'X-Internal-API-Key': RENDER_UPDATE_API_KEY 
                     }
                     update_response = requests.post(
                         render_update_endpoint,
@@ -250,15 +256,10 @@ def background_trading_loop():
             elif now.time() >= time(15, 30) or now.time() < time(9, 0):
                 logger.info(f"[{get_current_time_str()}] 현재 매매 시간 아님. 대기 중...")
 
-            monitor_positions_thread.monitor_positions_strategy()
+            monitor_positions_strategy(monitor_positions_thread, trade_manager_thread)
 
             with shared_state_lock:
                 shared_kiwoom_state["positions"] = monitor_positions_thread.get_all_positions() 
-                # 여기서 account_info는 이미 초기화 시점에 성공적으로 가져왔다고 가정합니다.
-                # 실시간 잔고 업데이트가 필요하다면 주기적인 TR 요청 로직을 추가해야 합니다.
-                # 현재는 초기화 시점의 balance를 사용.
-                # account_info = kiwoom_tr_request_thread.request_account_info(shared_kiwoom_state["account_number"])
-                # shared_kiwoom_state["balance"] = account_info.get("예수금", 0)
                 shared_kiwoom_state["last_update_time"] = get_current_time_str()
 
             time_module.sleep(30) 

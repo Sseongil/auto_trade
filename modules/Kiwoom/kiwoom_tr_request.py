@@ -9,9 +9,10 @@ from modules.common.utils import get_current_time_str
 logger = logging.getLogger(__name__)
 
 class KiwoomTrRequest:
-    def __init__(self, kiwoom_helper, pyqt_app_instance):
+    def __init__(self, kiwoom_helper, pyqt_app_instance, account_password=""):
         self.kiwoom_helper = kiwoom_helper 
         self.pyqt_app = pyqt_app_instance 
+        self.account_password = account_password 
         
         self.tr_data = None 
         self.rq_name = None 
@@ -37,24 +38,31 @@ class KiwoomTrRequest:
                     self.tr_data = {"예수금": int(deposit.strip()) if deposit.strip() else 0}
                     logger.info(f"TR 데이터 수신: {tr_code} - 예수금: {self.tr_data['예수금']}")
                 
-                # TODO: 다른 TR 코드에 대한 처리 로직 추가 (예: opw00018 등)
-                # opw00018은 멀티 데이터 (보유 종목 리스트)를 포함할 수 있으므로,
-                # GetRepeatCnt와 GetCommData를 사용하여 반복 처리해야 합니다.
-                # 예시:
-                # if tr_code == "opw00018":
-                #     cnt = self.kiwoom_helper.ocx.GetRepeatCnt(tr_code, rq_name)
-                #     items = []
-                #     for i in range(cnt):
-                #         item_data = {
-                #             "종목코드": self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "종목번호").strip(),
-                #             "종목명": self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "종목명").strip(),
-                #             "보유수량": int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "보유수량").strip()),
-                #             "매입가": int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "매입가").strip()),
-                #             "현재가": int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "현재가").strip())
-                #         }
-                #         items.append(item_data)
-                #     self.tr_data = {"보유종목": items}
+                elif tr_code == "opw00018":
+                    cnt = self.kiwoom_helper.ocx.GetRepeatCnt(tr_code, rq_name)
+                    holdings_list = []
+                    for i in range(cnt):
+                        item_name = self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "종목명").strip()
+                        stock_code = self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "종목번호").strip()
+                        current_qty = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "보유수량").strip())
+                        purchase_price = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "매입단가").strip())
+                        current_price = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "현재가").strip())
+                        total_purchase_amount = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "매입금액").strip())
+                        
+                        if stock_code.startswith('A'):
+                            stock_code = stock_code[1:]
 
+                        if current_qty > 0: 
+                            holdings_list.append({
+                                "stock_code": stock_code,
+                                "name": item_name,
+                                "quantity": current_qty,
+                                "purchase_price": purchase_price,
+                                "current_price": current_price,
+                                "total_purchase_amount": total_purchase_amount,
+                            })
+                    self.tr_data = {"holdings": holdings_list}
+                    logger.info(f"TR 데이터 수신: {tr_code} - 보유 종목 {len(holdings_list)}개.")
 
             except Exception as e:
                 logger.error(f"Error processing TR data for {tr_code}: {e}", exc_info=True)
@@ -74,7 +82,10 @@ class KiwoomTrRequest:
         self.tr_data = None 
 
         self.kiwoom_helper.ocx.SetInputValue("계좌번호", account_no)
-        
+        self.kiwoom_helper.ocx.SetInputValue("비밀번호", self.account_password) 
+        self.kiwoom_helper.ocx.SetInputValue("비밀번호입력매체구분", "00")
+        self.kiwoom_helper.ocx.SetInputValue("조회구분", "2") 
+
         screen_no = self._generate_unique_screen_no() 
 
         result = self.kiwoom_helper.ocx.CommRqData(
@@ -88,6 +99,34 @@ class KiwoomTrRequest:
         else:
             logger.error(f"계좌 정보 요청 실패: {result} ({self._get_error_message(result)})")
             return {"error": f"TR 요청 실패 코드: {result} ({self._get_error_message(result)})"}
+
+    def request_daily_account_holdings(self, account_no, timeout_ms=30000):
+        self.rq_name = "opw00018_req"
+        self.tr_data = None
+
+        self.kiwoom_helper.ocx.SetInputValue("계좌번호", account_no)
+        self.kiwoom_helper.ocx.SetInputValue("비밀번호", self.account_password) 
+        self.kiwoom_helper.ocx.SetInputValue("비밀번호입력매체구분", "00")
+
+
+        screen_no = self._generate_unique_screen_no()
+
+        result = self.kiwoom_helper.ocx.CommRqData(
+            self.rq_name, "opw00018", 0, screen_no 
+        )
+
+        if result == 0:
+            self.tr_wait_timer.start(timeout_ms)
+            self.tr_wait_event_loop.exec_()
+            if self.tr_data and "holdings" in self.tr_data:
+                return self.tr_data["holdings"]
+            else:
+                logger.warning(f"TR 요청 성공했으나 opw00018 보유 종목 데이터 없음: {self.tr_data}")
+                return []
+        else:
+            logger.error(f"보유 종목 요청 실패: {result} ({self._get_error_message(result)})")
+            return {"error": f"TR 요청 실패 코드: {result} ({self._get_error_message(result)})"}
+
 
     def _generate_unique_screen_no(self):
         unique_part = str(int(time.time() * 100000))[-4:] 
