@@ -1,57 +1,81 @@
+# modules/Kiwoom/kiwoom_query_helper.py
+
+import sys
 import logging
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QAxContainer import QAxWidget
-from modules.common.utils import get_current_time_str
+from PyQt5.QtCore import QEventLoop, QTimer 
+from modules.common.utils import get_current_time_str 
 
 logger = logging.getLogger(__name__)
 
 class KiwoomQueryHelper:
-    def __init__(self, ocx, app):
-        self.ocx = ocx
-        self.app = app
-        self._connected = False
+    def __init__(self, ocx_instance, pyqt_app_instance):
+        self.ocx = ocx_instance 
+        self.pyqt_app = pyqt_app_instance 
+        
+        self.connected_state = -1 
+        
+        self.connect_event_loop = QEventLoop() 
+        self.connect_timer = QTimer() 
+        self.connect_timer.setSingleShot(True) 
+        self.connect_timer.timeout.connect(self._on_connect_timeout) 
+        
+        self.ocx.OnEventConnect.connect(self._on_event_connect)
+        
         logger.info(f"{get_current_time_str()}: KiwoomQueryHelper initialized.")
 
-    def connect_kiwoom(self):
-        logger.info("✅ Kiwoom API 로그인 시도 중...")
-        try:
-            self.ocx.dynamicCall("CommConnect()")
-            self.app.processEvents()
+    def _on_event_connect(self, err_code):
+        self.connected_state = err_code 
+        if err_code == 0:
+            logger.info(f"[{get_current_time_str()}]: [✅] 로그인 성공")
+        else:
+            logger.error(f"[{get_current_time_str()}]: [❌] 로그인 실패 (에러 코드: {err_code})")
+        
+        if self.connect_timer.isActive():
+            self.connect_timer.stop()
 
-            import time
-            for i in range(30):  # 최대 30초 대기
-                state = int(self.ocx.dynamicCall("GetConnectState()"))
-                if state == 1:
-                    self._connected = True
-                    logger.info("✅ Kiwoom API 연결 확인 완료.")
-                    # 로그인 후 계좌정보 확인
-                    accounts = self.get_login_info("ACCNO")
-                    logger.info(f"🔐 로그인된 계좌 정보: {accounts}")
-                    return True
-                time.sleep(1)
+        if self.connect_event_loop.isRunning():
+            self.connect_event_loop.exit()
 
-            logger.error("❌ Kiwoom API 연결 실패 - 타임아웃")
+    def connect_kiwoom(self, timeout_ms=30000):
+        if self.ocx.dynamicCall("GetConnectState()") == 1: 
+            logger.info("✅ 키움 API 이미 연결됨.")
+            self.connected_state = 0 
+            return True
+
+        logger.info("✅ 키움 API 로그인 시도 중...")
+        self.ocx.dynamicCall("CommConnect()")
+        
+        self.connect_timer.start(timeout_ms)
+        
+        self.connect_event_loop.exec_()
+        
+        if self.connected_state == 0: 
+            return True
+        else:
+            logger.critical(f"❌ Kiwoom API 연결 실패 (에러 코드: {self.connected_state} 또는 타임아웃 발생)")
             return False
-        except Exception as e:
-            logger.critical(f"❌ Kiwoom 로그인 중 예외 발생: {e}", exc_info=True)
-            return False
+
+    def _on_connect_timeout(self):
+        if self.connect_event_loop.isRunning(): 
+            logger.error(f"[{get_current_time_str()}]: ❌ Kiwoom API 연결 실패 - 타임아웃 ({self.connect_timer.interval()}ms)")
+            self.connected_state = -999 
+            self.connect_event_loop.exit()
 
     def disconnect_kiwoom(self):
-        try:
-            self.ocx.dynamicCall("CommTerminate()")
-            self._connected = False
-            logger.info("🔌 Kiwoom API 연결 종료")
-        except Exception as e:
-            logger.warning(f"❌ Kiwoom API 종료 실패: {e}")
+        if self.ocx.dynamicCall("GetConnectState()") == 1: 
+            logger.info("🔌 Kiwoom API 연결 종료 시도...") 
+            self.ocx.dynamicCall("CommTerminate()") 
+            self.connected_state = -1 
+            logger.info("🔌 Kiwoom API 연결 종료 완료.")
+        else:
+            logger.info("🔌 이미 연결되지 않은 상태입니다.")
 
     def get_login_info(self, tag):
-        try:
-            value = self.ocx.dynamicCall("GetLoginInfo(QString)", [tag])
-            logger.info(f"🔎 GetLoginInfo({tag}) => {value}")
-            return value
-        except Exception as e:
-            logger.error(f"❌ GetLoginInfo 호출 실패 - tag: {tag}, 예외: {e}")
-            return ""
+        return self.ocx.dynamicCall("GetLoginInfo(QString)", tag)
 
-    def is_connected(self):
-        return self._connected
+    def get_stock_name(self, stock_code):
+        name = self.ocx.dynamicCall("GetMasterCodeName(QString)", stock_code)
+        if not name:
+            logger.warning(f"종목명 조회 실패: {stock_code}")
+            return "Unknown"
+        return name
