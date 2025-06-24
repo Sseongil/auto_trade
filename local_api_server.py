@@ -233,7 +233,7 @@ def initialize_kiwoom_api_in_background_thread():
             pythoncom.CoUninitialize()
         except Exception as e_uninit:
                 logger.warning(f"CoUninitialize 중 오류 발생: {e_uninit}")
-        return False, None, None, None, None, None
+        return False, None, None, None, None
 
 
 # --- 자동 매매 전략 백그라운드 루프 (메인 로직) ---
@@ -331,19 +331,19 @@ def background_trading_loop():
                 shared_kiwoom_state["last_update_time"] = get_current_time_str()
 
             time_module.sleep(30) 
-
-        except Exception as e:
-            msg = f"🔥 백그라운드 트레이딩 루프 오류 발생: {e}"
-            logger.exception(msg)
-            send_telegram_message(msg)
-            time_module.sleep(60)
-        finally: # 💡 메인 루프 종료 시 CoUninitialize 호출
-            if pyqt_app:
-                pyqt_app.quit() # QApplication 종료
-            try:
-                pythoncom.CoUninitialize() # CoInitialize가 성공했다면 Uninitialize
-            except Exception as e_uninit:
-                logger.warning(f"CoUninitialize 중 오류 발생 (메인 루프 종료 시): {e_uninit}")
+    # 💡 이 부분이 수정되었습니다: except와 finally 블록의 들여쓰기를 한 단계 줄입니다.
+    except Exception as e: 
+        msg = f"🔥 백그라운드 트레이딩 루프 오류 발생: {e}"
+        logger.exception(msg)
+        send_telegram_message(msg)
+        time_module.sleep(60)
+    finally: # � 메인 루프 종료 시 CoUninitialize 호출
+        if pyqt_app:
+            pyqt_app.quit() # QApplication 종료
+        try:
+            pythoncom.CoUninitialize() # CoInitialize가 성공했다면 Uninitialize
+        except Exception as e_uninit:
+            logger.warning(f"CoUninitialize 중 오류 발생 (메인 루프 종료 시): {e_uninit}")
 
 
 # --- Flask 엔드포인트 ---
@@ -391,4 +391,3 @@ if __name__ == '__main__':
         
     logger.info(f"🚀 Flask 서버 실행: http://0.0.0.0:{API_SERVER_PORT}")
     app.run(host="0.0.0.0", port=int(API_SERVER_PORT), debug=True, use_reloader=False)
-
