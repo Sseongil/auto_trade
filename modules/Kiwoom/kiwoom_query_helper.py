@@ -50,40 +50,40 @@ class KiwoomQueryHelper:
         """API로부터의 메시지를 수신했을 때 호출됩니다."""
         logger.info(f"[{get_current_time_str()}]: [API 메시지] [{rq_name}] {msg} (화면: {screen_no})")
 
-    def _on_receive_real_data(self, stock_code, real_type, real_data):
-        """
-        💡 실시간 시세 데이터 수신 이벤트 핸들러.
-        종목코드, 실시간 타입(주식체결, 주식호가 등), 실시간 데이터(FID 리스트)를 받습니다.
-        """
-        # logger.debug(f"실시간 데이터 수신: {stock_code}, 타입: {real_type}")
-        
-        # '주식체결' (real_type: "주식체결") 데이터를 예시로 처리
-        if real_type == "주식체결":
-            try:
-                # FID 들이 문자열로 넘어오므로, GetCommRealData를 통해 하나씩 가져옵니다.
-                current_price = abs(int(self.ocx.GetCommRealData(stock_code, 10).strip())) # 현재가 (절대값)
-                trading_volume = abs(int(self.ocx.GetCommRealData(stock_code, 15).strip())) # 거래량 (누적)
-                
-                # 필요한 다른 FID들도 여기에 추가:
-                # 20: 체결시간, 11: 전일대비, 12: 등락률, 13: 누적거래량, 14: 누적거래대금
-                # 27: (최우선)매도호가, 28: (최우선)매수호가
-                # 30: 매도호가1, 31: 매수호가1, 32: 매도잔량1, 33: 매수잔량1
-                # ...
-                
-                if stock_code not in self.real_time_data:
-                    self.real_time_data[stock_code] = {}
-                
-                self.real_time_data[stock_code].update({
-                    'current_price': current_price,
-                    'trading_volume': trading_volume,
-                    # 다른 실시간 데이터도 필요하면 여기에 추가
-                    'last_update_time': get_current_time_str()
-                })
-                # logger.debug(f"실시간 업데이트: {stock_code} - 현재가: {current_price:,}")
+def _on_receive_real_data(self, stock_code, real_type, real_data):
+    """
+    💡 실시간 시세 데이터 수신 이벤트 핸들러.
+    종목코드, 실시간 타입(주식체결, 주식호가 등), 실시간 데이터(FID 리스트)를 받습니다.
+    """
+    if real_type == "주식체결":
+        try:
+            current_price = abs(int(self.ocx.GetCommRealData(stock_code, 10).strip())) # 현재가 (절대값)
+            trading_volume = abs(int(self.ocx.GetCommRealData(stock_code, 15).strip())) # 거래량 (누적)
 
-            except Exception as e:
-                logger.error(f"❌ 실시간 데이터 처리 오류 ({stock_code}, {real_type}): {e}", exc_info=True)
-        # 다른 real_type (예: "주식호가")에 대한 처리 로직도 추가 가능
+            # 💡 추가된 FID 정보
+            chegyul_gangdo = float(self.ocx.GetCommRealData(stock_code, 228).strip()) if self.ocx.GetCommRealData(stock_code, 228).strip() else 0.0 # 체결강도
+            total_buy_cvol = abs(int(self.ocx.GetCommRealData(stock_code, 851).strip())) # 총 매수 잔량
+            total_sell_cvol = abs(int(self.ocx.GetCommRealData(stock_code, 852).strip())) # 총 매도 잔량
+            # 다른 필요한 FID들도 여기에 추가:
+            # 27: (최우선)매도호가, 28: (최우선)매수호가
+            highest_bid_price = abs(int(self.ocx.GetCommRealData(stock_code, 28).strip())) # 최우선 매수호가
+            lowest_ask_price = abs(int(self.ocx.GetCommRealData(stock_code, 27).strip())) # 최우선 매도호가
+
+            if stock_code not in self.real_time_data:
+                self.real_time_data[stock_code] = {}
+
+            self.real_time_data[stock_code].update({
+                'current_price': current_price,
+                'trading_volume': trading_volume,
+                'chegyul_gangdo': chegyul_gangdo,
+                'total_buy_cvol': total_buy_cvol,
+                'total_sell_cvol': total_sell_cvol,
+                '최우선매수호가': highest_bid_price,
+                '최우선매도호가': lowest_ask_price,
+                'last_update_time': get_current_time_str()
+            })
+        except Exception as e:
+            logger.error(f"❌ 실시간 데이터 처리 오류 ({stock_code}, {real_type}): {e}", exc_info=True)        # 다른 real_type (예: "주식호가")에 대한 처리 로직도 추가 가능
 
     def _on_receive_chejan_data(self, gubun, item_cnt, fid_list):
         """
