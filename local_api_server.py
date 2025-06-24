@@ -17,14 +17,16 @@ from PyQt5.QAxContainer import QAxWidget
 script_dir = os.path.dirname(os.path.abspath(__file__))
 modules_path = os.path.join(script_dir, 'modules')
 if modules_path not in sys.path:
-    sys.path.insert(0, modules_path)
+    # 💡 수정된 부분: sys.sys.path -> sys.path (이전 단계에서 이미 수정되었으나 다시 확인)
+    sys.path.insert(0, modules_path) 
 
 # --- 모듈 임포트 ---
 from modules.Kiwoom.kiwoom_query_helper import KiwoomQueryHelper
 from modules.Kiwoom.kiwoom_tr_request import KiwoomTrRequest
 from modules.Kiwoom.monitor_positions import MonitorPositions
 from modules.Kiwoom.trade_manager import TradeManager
-# from modules.strategies.monitor_positions_strategy import monitor_positions_strategy # 💡 이제 MonitorPositions 클래스의 메서드로 통합됨
+# 💡 수정된 부분: monitor_positions_strategy 함수를 그대로 임포트 (MonitorPositions의 메서드가 아님)
+from modules.strategies.monitor_positions_strategy import monitor_positions_strategy 
 
 from modules.common.config import get_env, API_SERVER_PORT
 from modules.common.utils import get_current_time_str
@@ -160,12 +162,13 @@ def initialize_kiwoom_api_in_background_thread():
         logger.info(f"💡 Kiwoom API 초기화에 사용될 계좌번호: '{account_number}'")
 
         # MonitorPositions, TradeManager 초기화 순서 및 의존성 해결
-        monitor_positions_thread = MonitorPositions(kiwoom_helper_thread, kiwoom_tr_request_thread, account_number) 
+        monitor_positions_thread = MonitorPositions(kiwoom_helper_thread, kiwoom_tr_request_thread, account_number) # trade_manager는 여기서 필요 없음
         trade_manager_thread = TradeManager(kiwoom_helper_thread, kiwoom_tr_request_thread, monitor_positions_thread, account_number)
         
-        # monitor_positions_strategy 함수를 직접 호출하는 방식이 아닌, 클래스 인스턴스에 메서드를 추가하고 호출하는 방식으로 변경
-        # MonitorPositions 클래스 내에 monitor_positions_strategy 메서드를 직접 정의해야 함 (아직 안 했으면 TODO)
-        monitor_positions_thread.trade_manager = trade_manager_thread # TradeManager 인스턴스를 MonitorPositions에 전달
+        # MonitorPositions에 TradeManager 인스턴스 주입
+        # NOTE: 이 부분은 MonitorPositions 클래스의 __init__ 시그니처에 따라 달라짐
+        # 현재 MonitorPositions는 trade_manager 인자를 직접 받지 않으므로, 아래 코드 추가
+        monitor_positions_thread.trade_manager = trade_manager_thread
 
         logger.info(f"✅ Kiwoom API 연결 완료 (백그라운드 트레이딩 스레드) - 계좌번호: {account_number}")
         
@@ -246,7 +249,7 @@ def background_trading_loop():
                     logger.info(f"🌐 Render 서버로 ngrok URL 업데이트 요청 중: {render_update_endpoint}")
                     headers = {
                         'Content-Type': 'application/json',
-                        'X-Internal-API-Key': RENDER_UPDATE_API_KEY 
+                        'X-Internal-API-Key': LOCAL_API_KEY_FOR_STATUS # 💡 Render 서버로 보낼 API 키로 LOCAL_API_KEY_FOR_STATUS 값 사용
                     }
                     update_response = requests.post(
                         render_update_endpoint,
@@ -288,9 +291,8 @@ def background_trading_loop():
                 logger.info(f"[{get_current_time_str()}] 현재 매매 시간 아님. 대기 중...")
 
             # --- 포지션 모니터링 및 매도 전략 실행 (지속적으로 실행) ---
-            # 💡 monitor_positions_strategy 함수를 MonitorPositions 클래스의 메서드로 호출
-            #    TradeManager는 MonitorPositions.__init__에서 주입되므로 별도 인자 불필요
-            monitor_positions_thread.monitor_positions_strategy()
+            # 💡 수정된 부분: 독립 함수로 호출
+            monitor_positions_strategy(monitor_positions_thread, trade_manager_thread)
 
             # Flask의 /status 엔드포인트를 위해 공유 상태 업데이트
             with shared_state_lock:
@@ -307,7 +309,7 @@ def background_trading_loop():
             send_telegram_message(msg)
             time_module.sleep(60)
         finally:
-            # 💡 애플리케이션 종료 시 PyQt 앱 종료
+            # 💡 애플리케이션 종료 시 PyQt 앱 종료 (스레드가 종료될 때)
             if pyqt_app:
                 pyqt_app.quit()
             try:
@@ -357,4 +359,3 @@ if __name__ == '__main__':
         
     logger.info(f"🚀 Flask 서버 실행: http://0.0.0.0:{API_SERVER_PORT}")
     app.run(host="0.0.0.0", port=int(API_SERVER_PORT), debug=True, use_reloader=False)
-
