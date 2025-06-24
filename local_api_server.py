@@ -17,7 +17,6 @@ from PyQt5.QAxContainer import QAxWidget
 script_dir = os.path.dirname(os.path.abspath(__file__))
 modules_path = os.path.join(script_dir, 'modules')
 if modules_path not in sys.path:
-    # 💡 수정된 부분: sys.sys.path -> sys.path (이전 단계에서 이미 수정되었으나 다시 확인)
     sys.path.insert(0, modules_path) 
 
 # --- 모듈 임포트 ---
@@ -25,7 +24,6 @@ from modules.Kiwoom.kiwoom_query_helper import KiwoomQueryHelper
 from modules.Kiwoom.kiwoom_tr_request import KiwoomTrRequest
 from modules.Kiwoom.monitor_positions import MonitorPositions
 from modules.Kiwoom.trade_manager import TradeManager
-# 💡 수정된 부분: monitor_positions_strategy 함수를 그대로 임포트 (MonitorPositions의 메서드가 아님)
 from modules.strategies.monitor_positions_strategy import monitor_positions_strategy 
 
 from modules.common.config import get_env, API_SERVER_PORT
@@ -53,11 +51,13 @@ shared_kiwoom_state = {
 shared_state_lock = threading.Lock() 
 
 # --- API 키 보안 인증 ---
+# 💡 Render 업데이트용 API 키
 RENDER_UPDATE_API_KEY = get_env("INTERNAL_API_KEY") 
 if not RENDER_UPDATE_API_KEY:
     logger.critical("❌ INTERNAL_API_KEY 환경 변수 미설정 - 서버 종료")
     sys.exit(1)
 
+# 💡 로컬 상태 확인용 API 키
 LOCAL_API_KEY_FOR_STATUS = get_env("LOCAL_API_KEY")
 if not LOCAL_API_KEY_FOR_STATUS:
     logger.critical("❌ LOCAL_API_KEY 환경 변수 미설정 (Flask status용) - 서버 종료")
@@ -94,6 +94,8 @@ def initialize_kiwoom_api_in_background_thread():
         logger.info("✅ pythoncom CoInitialize 완료 (백그라운드 트레이딩 스레드)")
         
         # 💡 QApplication 인스턴스 생성
+        # QApplication은 한 번만 생성되어야 하므로, 이 스레드 내에서 생성
+        # 이전에 "QApplication was not created in the main() thread." 경고가 떴는데, 이는 예상된 동작입니다.
         try:
             pyqt_app = QApplication([]) 
             logger.info("✅ 새로운 QApplication 인스턴스 생성 (백그라운드 트레이딩 스레드).")
@@ -138,7 +140,7 @@ def initialize_kiwoom_api_in_background_thread():
             return False, None, None, None, None, None
 
         account_number = get_env("ACCOUNT_NUMBERS", "").split(',')[0].strip()
-        account_password = get_env("ACCOUNT_PASSWORD", "") 
+        # account_password = get_env("ACCOUNT_PASSWORD", "") # 사용되지 않음 
 
         if not account_number:
             account_number_from_api = kiwoom_helper_thread.get_login_info("ACCNO")
@@ -162,13 +164,13 @@ def initialize_kiwoom_api_in_background_thread():
         logger.info(f"💡 Kiwoom API 초기화에 사용될 계좌번호: '{account_number}'")
 
         # MonitorPositions, TradeManager 초기화 순서 및 의존성 해결
-        monitor_positions_thread = MonitorPositions(kiwoom_helper_thread, kiwoom_tr_request_thread, account_number) # trade_manager는 여기서 필요 없음
+        # MonitorPositions 인스턴스 먼저 생성 (trade_manager는 None으로 전달)
+        monitor_positions_thread = MonitorPositions(kiwoom_helper_thread, kiwoom_tr_request_thread, account_number) 
+        # TradeManager 인스턴스 생성
         trade_manager_thread = TradeManager(kiwoom_helper_thread, kiwoom_tr_request_thread, monitor_positions_thread, account_number)
         
         # MonitorPositions에 TradeManager 인스턴스 주입
-        # NOTE: 이 부분은 MonitorPositions 클래스의 __init__ 시그니처에 따라 달라짐
-        # 현재 MonitorPositions는 trade_manager 인자를 직접 받지 않으므로, 아래 코드 추가
-        monitor_positions_thread.trade_manager = trade_manager_thread
+        monitor_positions_thread.set_trade_manager(trade_manager_thread) 
 
         logger.info(f"✅ Kiwoom API 연결 완료 (백그라운드 트레이딩 스레드) - 계좌번호: {account_number}")
         
@@ -226,6 +228,14 @@ def background_trading_loop():
     
     if not success:
         logger.critical("❌ 백그라운드 트레이딩 스레드 초기화 실패. 스레드를 종료합니다.")
+        # 만약 pyqt_app이 성공적으로 생성되었다면 여기서 종료
+        if pyqt_app: 
+            pyqt_app.quit()
+        try:
+            import pythoncom
+            pythoncom.CoUninitialize()
+        except Exception as e_uninit:
+            logger.warning(f"CoUninitialize 중 오류 발생: {e_uninit}")
         return 
 
     logger.info("Ngrok 터널 활성화를 위해 5초 대기...")
@@ -249,7 +259,7 @@ def background_trading_loop():
                     logger.info(f"🌐 Render 서버로 ngrok URL 업데이트 요청 중: {render_update_endpoint}")
                     headers = {
                         'Content-Type': 'application/json',
-                        'X-Internal-API-Key': LOCAL_API_KEY_FOR_STATUS # 💡 Render 서버로 보낼 API 키로 LOCAL_API_KEY_FOR_STATUS 값 사용
+                        'X-Internal-API-Key': RENDER_UPDATE_API_KEY # 💡 수정: LOCAL_API_KEY_FOR_STATUS -> RENDER_UPDATE_API_KEY
                     }
                     update_response = requests.post(
                         render_update_endpoint,
@@ -291,7 +301,6 @@ def background_trading_loop():
                 logger.info(f"[{get_current_time_str()}] 현재 매매 시간 아님. 대기 중...")
 
             # --- 포지션 모니터링 및 매도 전략 실행 (지속적으로 실행) ---
-            # 💡 수정된 부분: 독립 함수로 호출
             monitor_positions_strategy(monitor_positions_thread, trade_manager_thread)
 
             # Flask의 /status 엔드포인트를 위해 공유 상태 업데이트
@@ -359,3 +368,4 @@ if __name__ == '__main__':
         
     logger.info(f"🚀 Flask 서버 실행: http://0.0.0.0:{API_SERVER_PORT}")
     app.run(host="0.0.0.0", port=int(API_SERVER_PORT), debug=True, use_reloader=False)
+
