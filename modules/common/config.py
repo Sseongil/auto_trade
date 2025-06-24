@@ -1,6 +1,37 @@
 # modules/common/config.py
 
-# ... (기존 상수들) ...
+import os
+from dotenv import load_dotenv
+
+# .env 파일 로드 (환경 변수 사용을 위함)
+load_dotenv()
+
+# --- 환경 변수 로드 헬퍼 함수 ---
+def get_env(key, default=None):
+    return os.getenv(key, default)
+
+# --- 경로 설정 ---
+# 프로젝트 루트 디렉토리 (local_api_server.py가 위치한 곳)
+# sys.path에 modules가 추가되어 있으므로, 데이터 경로는 절대 경로 또는 상대 경로로 설정합니다.
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) # modules 폴더의 부모 폴더 (stock_auto)
+DATA_DIR = os.path.join(BASE_DIR, 'data') # data 폴더 경로
+
+# 데이터 폴더가 없으면 생성
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# � 포지션 파일 경로 추가
+POSITIONS_FILE_PATH = os.path.join(DATA_DIR, 'positions.json')
+TRADE_LOG_DB_PATH = os.path.join(DATA_DIR, 'trade_log.db')
+
+# --- Kiwoom API 관련 설정 ---
+KIWOOM_OCX_VERSION = "KHOPENAPI.KHOpenAPICtrl.1"
+API_SERVER_PORT = get_env("API_SERVER_PORT", "5000") # Flask 서버 포트
+ACCOUNT_NUMBERS = get_env("ACCOUNT_NUMBERS", "") # .env에서 계좌번호 로드 (쉼표로 구분 가능)
+LOCAL_API_KEY = get_env("LOCAL_API_KEY") # 로컬 Flask API 인증 키
+
+# --- Telegram 봇 설정 ---
+TELEGRAM_BOT_TOKEN = get_env("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = get_env("TELEGRAM_CHAT_ID")
 
 # --- 매수 전략 관련 상수 ---
 MIN_GAP_UP_PCT = 3.0
@@ -25,3 +56,4 @@ TAKE_PROFIT_PCT_1ST = 2.0 # 1차 익절 +2.0%
 TRAIL_STOP_PCT_2ND = 0.8 # 2차 익절 (트레일링 스탑) -0.8% 하락
 STOP_LOSS_PCT_ABS = -1.2 # 절대 손절 -1.2%
 TIME_STOP_MINUTES = 15 # 시간 손절 15분
+
