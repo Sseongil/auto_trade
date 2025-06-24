@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 # 현재는 Strategy에서 직접 매매 로그를 남기므로 여기서 생성
 trade_logger = TradeLogger()
 
+# 💡 MonitorPositions 클래스의 메서드로 통합될 예정이므로, 함수 시그니처 변경
+# 이 함수는 더 이상 독립적인 함수가 아니라 MonitorPositions 클래스의 메서드가 됩니다.
+# 따라서 monitor_positions_strategy(monitor_positions, trade_manager) -> self, trade_manager 로 변경.
+# 하지만 현재 호출 방식(monitor_positions_strategy(monitor_positions_thread, trade_manager_thread))을 유지하기 위해
+# 임시적으로 함수로 유지하고, 나중에 MonitorPositions 클래스 내부로 이동시키겠습니다.
 def monitor_positions_strategy(monitor_positions, trade_manager): 
     now = datetime.now()
     current_time_str = get_current_time_str()
