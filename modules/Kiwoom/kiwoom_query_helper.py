@@ -2,11 +2,8 @@
 
 import sys
 import logging
-import time # generate_real_time_screen_no에서 사용
+from PyQt5.QtCore import QEventLoop, QTimer # 💡 QEventLoop와 QTimer 임포트
 
-# QApplication과 QAxWidget은 이제 local_api_server에서 직접 관리하여 주입받습니다.
-# from PyQt5.QtWidgets import QApplication
-# from PyQt5.QAxContainer import QAxWidget
 from modules.common.utils import get_current_time_str 
 
 logger = logging.getLogger(__name__)
@@ -19,6 +16,12 @@ class KiwoomQueryHelper:
         
         self.connected_state = -1 # 초기 상태: 미접속 (0: 연결 성공)
         
+        # 💡 로그인 대기를 위한 전용 QEventLoop와 QTimer
+        self.connect_event_loop = QEventLoop() 
+        self.connect_timer = QTimer() 
+        self.connect_timer.setSingleShot(True) # 타이머 1회성 설정
+        self.connect_timer.timeout.connect(self._on_connect_timeout) # 타임아웃 시 콜백 연결
+        
         # Kiwoom API 이벤트 연결
         self.ocx.OnEventConnect.connect(self._on_event_connect)
         self.ocx.OnReceiveRealData.connect(self._on_receive_real_data) # 💡 실시간 데이터 이벤트 연결
@@ -26,13 +29,10 @@ class KiwoomQueryHelper:
         self.ocx.OnReceiveChejanData.connect(self._on_receive_chejan_data) # 체결/잔고 이벤트 연결
 
         # 💡 실시간 데이터 저장용 딕셔너리
-        # { '종목코드': {'현재가': 0, '시가': 0, '고가': 0, '저가': 0, '거래량': 0, '체결강도': 0.0, ...}, ... }
+        # { '종목코드': {'current_price': 0, 'trading_volume': 0, 'chegyul_gangdo': 0.0, 'total_buy_cvol': 0, ...}, ... }
         self.real_time_data = {} 
         self.real_time_registered_screens = {} # {스크린번호: [종목코드, ...]}
 
-        # 로그인 이벤트 루프는 주입받은 pyqt_app 인스턴스를 사용합니다.
-        self.login_event_loop = self.pyqt_app 
-        
         # 💡 시장 종목 코드 리스트 캐싱 (최초 1회만 조회)
         self._all_stock_codes = {"0": [], "10": []} # "0": KOSPI, "10": KOSDAQ
 
@@ -48,9 +48,20 @@ class KiwoomQueryHelper:
         else:
             logger.error(f"[{get_current_time_str()}]: [❌] 로그인 실패 (에러 코드: {err_code})")
         
-        # 로그인 이벤트 루프가 실행 중이라면 종료 (블로킹 해제)
-        if self.login_event_loop.isRunning():
-            self.login_event_loop.exit()
+        # 💡 연결 타이머가 활성 상태라면 중지
+        if self.connect_timer.isActive():
+            self.connect_timer.stop()
+
+        # 💡 로그인 대기 중인 이벤트 루프가 있다면 종료
+        if self.connect_event_loop.isRunning():
+            self.connect_event_loop.exit()
+
+    def _on_connect_timeout(self):
+        """로그인 연결 타임아웃 발생 시 호출되는 콜백."""
+        if self.connect_event_loop.isRunning():
+            logger.error(f"[{get_current_time_str()}]: ❌ Kiwoom API 연결 실패 - 타임아웃 ({self.connect_timer.interval()}ms)")
+            self.connected_state = -999 # 타임아웃을 나타내는 임의의 에러 코드
+            self.connect_event_loop.exit() # 이벤트 루프 강제 종료
 
     def _on_receive_msg(self, screen_no, rq_name, tr_code, msg):
         """API로부터의 메시지를 수신했을 때 호출됩니다."""
@@ -94,15 +105,14 @@ class KiwoomQueryHelper:
         """
         💡 체결/잔고 데이터 수신 이벤트 핸들러.
         매매체결통보, 잔고편입/편출 통보 등을 수신합니다.
-        TradeManager에서 처리하는 것이 일반적이지만, 여기에서도 수신은 가능.
         (TradeManager가 이 이벤트를 연결하고 처리하는 것이 더 적절합니다.)
         """
-        # logger.debug(f"체결 데이터 수신 (Helper): Gubun: {gubun}, FID List: {fid_list}")
         pass # TradeManager에서 주로 처리하므로 여기서는 pass
 
-    def connect_kiwoom(self):
+    def connect_kiwoom(self, timeout_ms=30000): # 💡 타임아웃 인자 추가 (기본 30초)
         """
         키움증권 API에 연결을 시도합니다.
+        지정된 시간(timeout_ms) 내에 연결되지 않으면 타임아웃 처리됩니다.
         """
         if self.ocx.dynamicCall("GetConnectState()") == 0:
             logger.info("✅ 키움 API 이미 연결됨.")
@@ -110,17 +120,19 @@ class KiwoomQueryHelper:
             return True
 
         logger.info("✅ 키움 API 로그인 시도 중...")
-        # CommConnect() 호출 (로그인 시도)
         self.ocx.dynamicCall("CommConnect()")
         
-        # 로그인 성공/실패 응답을 기다리기 위해 이벤트 루프 실행
-        # _on_event_connect에서 이벤트 루프를 종료합니다.
-        self.login_event_loop.exec_()
+        # 💡 로그인 타임아웃 타이머 설정
+        self.connect_timer.start(timeout_ms)
         
-        if self.connected_state == 0: # 로그인 성공
+        # 💡 로그인 성공/실패 응답을 기다리기 위해 전용 QEventLoop 실행
+        self.connect_event_loop.exec_()
+        
+        # 이벤트 루프가 종료된 후 연결 상태 확인
+        if self.connected_state == 0: 
             return True
         else:
-            logger.critical(f"❌ Kiwoom API 연결 실패 (에러 코드: {self.connected_state})")
+            logger.critical(f"❌ Kiwoom API 연결 실패 (에러 코드: {self.connected_state} 또는 타임아웃 발생)")
             return False
 
     def disconnect_kiwoom(self):
@@ -128,11 +140,8 @@ class KiwoomQueryHelper:
         키움증권 API 연결을 종료합니다.
         """
         if self.ocx.dynamicCall("GetConnectState()") == 1: # 연결되어 있다면
-            logger.info("🔌 연결 종료 (별도 지원 없음)")
-            # 키움 API는 명시적인 disconnect 함수를 제공하지 않고,
-            # 보통 프로그램 종료 시 연결이 끊어집니다.
-            # QAxWidget을 명시적으로 파괴하거나 애플리케이션 종료를 유도할 수 있습니다.
-            self.connected_state = -1 # 상태 업데이트
+            logger.info("🔌 Kiwoom API 연결 종료") # 메시지 변경
+            self.connected_state = -1 
         else:
             logger.info("🔌 이미 연결되지 않은 상태입니다.")
 

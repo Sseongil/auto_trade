@@ -28,7 +28,8 @@ def monitor_positions_strategy(monitor_positions, trade_manager):
 
     # 💡 Kiwoom API 연결 상태 확인
     if not monitor_positions.kiwoom_helper.connected_state == 0: # 0: 연결 성공
-        logger.warning(f"[{current_time_str}] Kiwoom API 연결 상태 불량. 포지션 모니터링 건너뜁니다.")
+        logger.warning(f"[{current_time_str}] Kiwoom API 연결 상태 불량. 포지션 모니터링 건너뜀.")
+        # API 연결이 끊겼더라도 장 마감 정리 로직은 시도해야 할 수 있음 (예: 프로그램 재시작 시점)
         _handle_market_close_cleanup(monitor_positions, trade_manager, now)
         return
 
@@ -37,16 +38,17 @@ def monitor_positions_strategy(monitor_positions, trade_manager):
 
     if not current_positions:
         logger.info(f"[{current_time_str}] 현재 보유 중인 포지션이 없습니다.")
-        _handle_market_close_cleanup(monitor_positions, trade_manager, now)
+        _handle_market_close_cleanup(monitor_positions, trade_manager, now) # 포지션 없어도 정리 로직은 확인
         return
 
     # 💡 매매 시간 (09:05 ~ 15:20)에만 매도 전략 실행
     if time(9, 5) <= now.time() < time(15, 20): 
         for stock_code, pos_data in current_positions.items():
             try:
-                if pos_data['quantity'] <= 0: # 이미 매도 완료된 포지션은 건너뜁니다.
-                    logger.debug(f"[{current_time_str}] {pos_data.get('name', stock_code)} - 수량 0 또는 음수. 모니터링 건너뜁니다.")
-                    if pos_data.get('buy_time') is None and pos_data['quantity'] == 0:
+                if pos_data['quantity'] <= 0: # 이미 매도 완료된 포지션은 건너뜀
+                    logger.debug(f"[{current_time_str}] {pos_data.get('name', stock_code)} - 수량 0 또는 음수. 모니터링 건너뜀.")
+                    # 실제 수량이 0인데 buy_time이 None이 아닌 경우는 완전 매도 후 정리 안된 경우
+                    if pos_data.get('buy_time') is not None and pos_data['quantity'] == 0:
                          monitor_positions.remove_position(stock_code)
                     continue
 
@@ -61,9 +63,9 @@ def monitor_positions_strategy(monitor_positions, trade_manager):
                 name = pos_data['name']
                 buy_time_str = pos_data.get('buy_time')
                 half_exited = pos_data.get('half_exited', False) # 1차 익절 여부
-                trail_high = pos_data.get('trail_high', current_price) # 트레일링 고점
+                trail_high = pos_data.get('trail_high', current_price) # 트레일링 고점 (초기값은 현재가)
 
-                # 매수가 0인 경우 (예: 초기화 오류 등) 방지
+                # 매수가 0인 경우 방지
                 if purchase_price == 0:
                     logger.warning(f"⚠️ {name}({stock_code}) 매입가 0. 매도 전략 실행 불가.")
                     continue
@@ -73,7 +75,7 @@ def monitor_positions_strategy(monitor_positions, trade_manager):
                 # 💡 트레일링 고점 업데이트 (현재가가 기록된 최고가보다 높으면 갱신)
                 if current_price > trail_high:
                     pos_data['trail_high'] = current_price
-                    monitor_positions.save_positions() 
+                    monitor_positions.save_positions() # 업데이트된 트레일링 하이 저장
                     logger.debug(f"DEBUG: {name}({stock_code}) 트레일링 고점 갱신: {trail_high:,} -> {current_price:,}원")
                 
                 # 1. 1차 익절 (매수가 대비 +2.0% 상승 시, 보유 수량의 50% 분할 익절)
@@ -88,6 +90,7 @@ def monitor_positions_strategy(monitor_positions, trade_manager):
                         continue 
 
                 # 2. 2차 익절 (트레일링 스탑): 1차 익절 후 남은 수량에 대해, 매수 후 기록된 최고가 대비 -0.8% 하락 시 전량 매도
+                # 중요한 것은 현재 잔여 수량 (quantity)이 있어야 하고, 최고가 대비 하락폭이 기준 이상이어야 함.
                 drop_from_high_pct = ((trail_high - current_price) / trail_high) * 100 if trail_high != 0 else 0.0
                 if drop_from_high_pct >= TRAIL_STOP_PCT_2ND and quantity > 0:
                     logger.info(f"✅ {name}({stock_code}) 2차 익절(트레일링 스탑) 조건 달성. 최고가 대비 -{drop_from_high_pct:.2f}%. 전량 매도 시도.")

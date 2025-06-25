@@ -8,7 +8,7 @@ import time # API 요청 간 대기 시간을 위해 임포트
 # 필요한 모듈 임포트
 from modules.common.utils import get_current_time_str
 from modules.notify import send_telegram_message
-from modules.trade_logger import TradeLogger
+from modules.trade_logger import TradeLogger 
 from modules.common.config import (
     MIN_GAP_UP_PCT, MIN_CURRENT_PRICE_VS_OPEN_PCT, MIN_VOLUME_INCREASE_RATIO,
     MIN_TRADING_VALUE_BILLION, MIN_CHEGYUL_GANGDO, MIN_BUY_SELL_RATIO,
@@ -59,6 +59,9 @@ def check_buy_conditions(kiwoom_helper, kiwoom_tr_request, stock_code, stock_nam
     # --- TR 데이터 요청 (일봉, 5분봉, 시가총액 등) ---
     today_str = datetime.today().strftime("%Y%m%d")
     
+    # 💡 API 요청 간 지연 시간 (TR 요청이 연속으로 너무 빨리 나가지 않도록)
+    time.sleep(0.05) # 50ms 대기 (초당 20회 요청 제한 고려)
+
     # 일봉 데이터 요청 (OPT10081) - 최소 60일치 데이터 필요
     daily_ohlcv_data = kiwoom_tr_request.request_daily_ohlcv_data(stock_code, today_str, sPrevNext="0")
     if not daily_ohlcv_data or daily_ohlcv_data.get("error"):
@@ -74,8 +77,10 @@ def check_buy_conditions(kiwoom_helper, kiwoom_tr_request, stock_code, stock_nam
     df_daily['날짜'] = pd.to_datetime(df_daily['날짜'])
     df_daily = df_daily.sort_values(by='날짜', ascending=True).reset_index(drop=True)
     
+    time.sleep(0.05) # API 요청 간 지연 시간
+
     # 5분봉 데이터 요청 (OPT10080) - 최소 20개 데이터 필요
-    five_min_ohlcv_data = kiwoom_tr_request.request_five_minute_ohlcv_data(stock_code, "0", sPrevNext="0") # '틱범위' 5분, '기준일자'는 사실상 무시됨
+    five_min_ohlcv_data = kiwoom_tr_request.request_five_minute_ohlcv_data(stock_code, "5", sPrevNext="0") # '틱범위' 5분
     if not five_min_ohlcv_data or five_min_ohlcv_data.get("error"):
         logger.warning(f"⚠️ {stock_name}({stock_code}) 5분봉 데이터 조회 실패: {five_min_ohlcv_data.get('error', '응답 없음')}")
         return None
@@ -85,19 +90,22 @@ def check_buy_conditions(kiwoom_helper, kiwoom_tr_request, stock_code, stock_nam
         logger.warning(f"⚠️ {stock_name}({stock_code}) 5분봉 데이터 부족. 조건 검사 불가.")
         return None
 
+    time.sleep(0.05) # API 요청 간 지연 시간
+
     # 시가총액 및 기본 정보 요청 (OPT10001)
     stock_info = kiwoom_tr_request.request_stock_basic_info(stock_code)
     if not stock_info or stock_info.get("error"):
         logger.warning(f"⚠️ {stock_name}({stock_code}) 기본 정보 조회 실패: {stock_info.get('error', '응답 없음')}")
         return None
     
-    market_cap_billion = stock_info.get('시가총액', 0) / 1_0000_0000 # 억 단위로 변환 (키움은 원단위로 주는 경우가 많음)
+    # 시가총액은 원단위로 넘어오므로 억 단위로 변환
+    market_cap_billion = stock_info.get('시가총액', 0) / 1_0000_0000 
 
     # --- 2단계: 매수 조건 검사 ---
     
     # [시가 갭 상승 및 장대 양봉 형성]
     # 당일 시가가 전일 종가 대비 3% 이상 갭 상승 출발.
-    if len(df_daily) < 2: # 전일 종가 비교를 위해 최소 2일치 데이터 필요
+    if len(df_daily) < 2: 
         logger.debug(f"❌ {stock_name}({stock_code}) 일봉 데이터 부족 (2일 미만). 갭 상승 조건 건너뜀.")
         return None 
     
@@ -122,12 +130,12 @@ def check_buy_conditions(kiwoom_helper, kiwoom_tr_request, stock_code, stock_nam
     # [압도적인 거래량/거래대금]
     # 당일 누적 거래량이 직전 5일 평균 거래량 대비 700% 이상 증가.
     # df_daily는 오늘 데이터도 포함하므로, 직전 5일 데이터는 오늘 제외한 5개 봉
-    if len(df_daily) < 6: # 오늘 데이터 포함해서 6개 (오늘 + 직전 5일)
+    if len(df_daily) < 6: 
         logger.debug(f"❌ {stock_name}({stock_code}) 일봉 데이터 부족 (6일 미만). 거래량 증가 조건 건너뜀.")
         return None
         
-    last_5_days_volume = df_daily['거래량'].iloc[-6:-1].astype(float) # 오늘 제외한 직전 5일 거래량
-    if last_5_days_volume.empty or avg_5_day_volume <= 0: # 평균 거래량이 0이거나 데이터가 없을 경우 방지
+    last_5_days_volume = df_daily['거래량'].iloc[-6:-1].astype(float) 
+    if last_5_days_volume.empty or last_5_days_volume.mean() <= 0: # 평균 거래량이 0이거나 데이터가 없을 경우 방지
         avg_5_day_volume = 1 # 0으로 나누기 방지
     else:
         avg_5_day_volume = last_5_days_volume.mean()
@@ -138,7 +146,7 @@ def check_buy_conditions(kiwoom_helper, kiwoom_tr_request, stock_code, stock_nam
         return None
 
     # 당일 누적 거래대금이 200억 원 이상.
-    today_trading_value_billion = (current_price * trading_volume) / 1_0000_0000_0000 # 억 단위로 변환
+    today_trading_value_billion = (current_price * trading_volume) / 1_0000_0000 
     if today_trading_value_billion < MIN_TRADING_VALUE_BILLION:
         logger.debug(f"❌ {stock_name}({stock_code}) 거래대금 조건 불충족: {today_trading_value_billion:.2f}억 원 (기준: {MIN_TRADING_VALUE_BILLION}억 원)")
         return None
@@ -158,7 +166,7 @@ def check_buy_conditions(kiwoom_helper, kiwoom_tr_request, stock_code, stock_nam
     ma60_daily = df_daily['MA60'].iloc[-1]
     
     daily_ma_golden_cross = False
-    if len(df_daily) >= 2:
+    if len(df_daily) >= 2: # 최소 2일 데이터 필요
         ma5_prev = df_daily['MA5'].iloc[-2]
         ma20_prev = df_daily['MA20'].iloc[-2]
         if ma5_prev is not None and ma20_prev is not None and ma5_prev < ma20_prev and ma5_daily >= ma20_daily:
@@ -214,7 +222,6 @@ def check_buy_conditions(kiwoom_helper, kiwoom_tr_request, stock_code, stock_nam
 
     # 당일 등락률: 매수 시점 기준 +12% 이하 (고점 추격 방지).
     # 등락률은 전일 종가 대비 현재가를 기준으로 계산
-    # df_daily.iloc[-2]['현재가']는 전일 종가를 의미 (OPT10081)
     if len(df_daily) < 2:
         logger.debug(f"❌ {stock_name}({stock_code}) 전일 종가 데이터 부족. 당일 등락률 조건 건너뜀.")
         return None
@@ -300,7 +307,7 @@ def execute_buy_strategy(kiwoom_helper, kiwoom_tr_request, trade_manager, monito
     current_time_str = get_current_time_str()
     logger.info(f"[{current_time_str}] 매수 전략 실행: 종목 검색 및 매수 결정.")
 
-    # 1. 모든 코스피/코스닥 종목 리스트 가져오기 (KiwoomQueryHelper에 해당 메서드 추가 완료)
+    # 1. 모든 코스피/코스닥 종목 리스트 가져오기
     kospi_tickers = kiwoom_helper.get_code_list_by_market("0") # 코스피
     kosdaq_tickers = kiwoom_helper.get_code_list_by_market("10") # 코스닥
     all_tickers = kospi_tickers + kosdaq_tickers
@@ -322,8 +329,7 @@ def execute_buy_strategy(kiwoom_helper, kiwoom_tr_request, trade_manager, monito
         # API 요청 제한을 준수하기 위한 지연 시간
         # 키움 API는 보통 1초에 5회 이상의 TR 요청을 제한합니다.
         # 여기서는 종목당 여러 TR 요청이 발생하므로, 충분한 지연 시간을 둡니다.
-        # TR 요청 횟수와 응답 시간, 그리고 전체 종목 수에 따라 이 값을 조정해야 합니다.
-        time.sleep(0.3) # 각 종목 검사 간 0.3초 대기
+        time.sleep(0.2) # 각 종목 검사 간 0.2초 대기 (초당 5회 제한 고려, TR 3회 호출)
 
         if stock_code in current_holding_codes:
             logger.debug(f"보유 중인 종목 {stock_code}는 매수 후보에서 제외합니다.")
@@ -338,7 +344,6 @@ def execute_buy_strategy(kiwoom_helper, kiwoom_tr_request, trade_manager, monito
         result = check_buy_conditions(kiwoom_helper, kiwoom_tr_request, stock_code, stock_name)
         if result:
             buy_candidates.append(result)
-            # 매수 후보 종목이 발견되면 로그를 좀 더 상세히 남깁니다.
             logger.info(f"✨ 매수 후보 종목 발견: {stock_name}({stock_code}), 점수: {result['score']:.2f}")
 
     if not buy_candidates:
@@ -384,6 +389,7 @@ def execute_buy_strategy(kiwoom_helper, kiwoom_tr_request, trade_manager, monito
     order_success = False
     
     # 최우선 매수 호가 조회 (kiwoom_helper.real_time_data에서 가져옴)
+    # real_time_data에 최우선매수호가가 없을 경우 current_price 사용 (시장가 매수 등)
     buy_order_price = kiwoom_helper.real_time_data.get(target_stock_code, {}).get('최우선매수호가', target_current_price)
     
     logger.info(f"[{current_time_str}] 지정가 매수 시도: {target_stock_name}({target_stock_code}) 수량: {quantity_to_buy}주, 가격: {buy_order_price:,}원")
@@ -398,8 +404,8 @@ def execute_buy_strategy(kiwoom_helper, kiwoom_tr_request, trade_manager, monito
         send_telegram_message(f"⚠️ 지정가 매수 실패: {target_stock_name}. 시장가 재시도.")
         
         # 💡 미체결 확인 로직 (실제로는 TradeManager의 OnReceiveChejanData에서 처리)
-        # 여기서는 단순히 5초 대기 후 미체결로 간주하고 시장가 재시도
-        time.sleep(5) 
+        # 여기서는 주문 실패 후 바로 시장가 재시도
+        # TradeManager 내부에서 주문 타임아웃/응답 대기가 이루어지므로, 여기서는 추가 time.sleep 필요 없음
         
         # 시장가 매수 재시도 (미체결 주문이 있을 경우 취소 후 재주문 로직도 필요)
         logger.info(f"[{current_time_str}] 시장가 매수 시도: {target_stock_name}({target_stock_code}) 수량: {quantity_to_buy}주")
@@ -416,18 +422,9 @@ def execute_buy_strategy(kiwoom_helper, kiwoom_tr_request, trade_manager, monito
         # 매수 주문 성공 시, MonitorPositions에서 자동으로 포지션이 업데이트될 것임
         # 여기서는 매매 로그만 남깁니다.
         # 매수 체결 가격은 TradeManager의 체결 이벤트에서 받아와야 정확합니다.
-        # 여기서는 임시로 현재가를 사용합니다.
-        trade_logger.log_trade(
-            stock_code=target_stock_code,
-            stock_name=target_stock_name,
-            trade_type="매수",
-            order_price=buy_order_price, # 지정가 시도 가격
-            executed_price=target_current_price, # 임시로 현재가 (실제는 체결가)
-            quantity=quantity_to_buy,
-            pnl_amount=0, pnl_pct=0,
-            account_balance_after_trade=trade_manager.kiwoom_tr_request.request_account_info(trade_manager.account_number).get("예수금"),
-            strategy_name="BuySignal"
-        )
+        # 여기서는 임시로 매수 시도 가격 또는 현재가를 사용합니다.
+        # 실제로는 OnReceiveChejanData에서 정확한 체결가를 받아와 log_trade를 호출해야 합니다.
+        pass # log_trade는 TradeManager의 _on_receive_chejan_data에서 호출됩니다.
         logger.info(f"[{current_time_str}] 매수 전략 실행 종료: {target_stock_name} 매수 주문 완료.")
     else:
         logger.info(f"[{current_time_str}] 매수 전략 실행 종료: {target_stock_name} 매수 주문 실패.")
