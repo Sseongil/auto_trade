@@ -1,212 +1,172 @@
 # modules/strategies/monitor_positions_strategy.py
 
 import logging
-from datetime import datetime, time, timedelta 
+from datetime import datetime, time, timedelta
 import time as time_module
 
+# 필요한 모듈 임포트
 from modules.common.utils import get_current_time_str
-from modules.common.config import STOP_LOSS_PCT, TAKE_PROFIT_PCT, TRAIL_STOP_PCT, MAX_HOLD_DAYS, DEFAULT_LOT_SIZE 
-from modules.notify import send_telegram_message # 텔레그램 알림을 위해 임포트
-from modules.trade_logger import TradeLogger # 💡 매매 로그 기록을 위해 TradeLogger 클래스 임포트
+from modules.notify import send_telegram_message
+# 💡 config에서 전략 관련 상수 임포트 (이름 일치 확인)
+from modules.common.config import (
+    TAKE_PROFIT_PCT_1ST, TRAIL_STOP_PCT_2ND, STOP_LOSS_PCT_ABS,
+    TIME_STOP_MINUTES, MAX_HOLD_DAYS
+)
 
 logger = logging.getLogger(__name__)
 
-# TradeLogger 인스턴스를 전역적으로 생성 (필요시 TradeManager에서 주입 받을 수도 있음)
-# 현재는 Strategy에서 직접 매매 로그를 남기므로 여기서 생성
-trade_logger = TradeLogger()
-
-# 💡 MonitorPositions 클래스의 메서드로 통합될 예정이므로, 함수 시그니처 변경
-# 이 함수는 더 이상 독립적인 함수가 아니라 MonitorPositions 클래스의 메서드가 됩니다.
-# 따라서 monitor_positions_strategy(monitor_positions, trade_manager) -> self, trade_manager 로 변경.
-# 하지만 현재 호출 방식(monitor_positions_strategy(monitor_positions_thread, trade_manager_thread))을 유지하기 위해
-# 임시적으로 함수로 유지하고, 나중에 MonitorPositions 클래스 내부로 이동시키겠습니다.
-def monitor_positions_strategy(monitor_positions, trade_manager): 
+def monitor_positions_strategy(monitor_positions, trade_manager):
+    """
+    모든 보유 포지션을 모니터링하고, 사전 정의된 전략(익절, 손절, 트레일링 스탑, 시간 손절 등)에 따라
+    매도 주문을 실행하거나 포지션 정보를 업데이트하는 함수.
+    이 함수는 local_api_server의 백그라운드 트레이딩 루프에서 주기적으로 호출됩니다.
+    """
     now = datetime.now()
     current_time_str = get_current_time_str()
     
     logger.info(f"[{current_time_str}] 포지션 모니터링 및 매매 전략 실행 중...")
 
-    # 최신 보유 현황을 키움 API에서 가져와서 로컬 데이터와 동기화
-    # NOTE: api_holdings_data는 계좌 보유 종목 리스트를 가져오는 용도이며,
-    # 각 종목의 `current_price`는 KiwoomQueryHelper의 `real_time_data`에서 가져올 것입니다.
-    logger.info(f"[{current_time_str}] Kiwoom API로부터 최신 계좌 보유 현황 조회 중...")
-    api_holdings_data = monitor_positions.kiwoom_tr_request.request_daily_account_holdings(
-        monitor_positions.account_number
-    )
-    
-    if isinstance(api_holdings_data, dict) and "error" in api_holdings_data:
-        logger.error(f"[{current_time_str}] ❌ Kiwoom API 보유 종목 조회 실패: {api_holdings_data['error']}. 포지션 모니터링을 중단합니다.")
-        _handle_market_close_cleanup(monitor_positions, trade_manager, now)
-        return
-    
-    # Kiwoom API 보유 현황을 바탕으로 로컬 포지션 데이터 동기화
-    monitor_positions.sync_local_positions(api_holdings_data)
-    
-    # 💡 실시간 시세 등록 (보유 종목에 대한 실시간 데이터를 구독)
-    monitor_positions.register_all_positions_for_real_time_data()
-
-    # 현재 포지션 데이터 가져오기 (이미 current_price는 real_time_data에서 업데이트됨)
-    current_positions = monitor_positions.get_all_positions()
-
-    if not current_positions:
-        logger.info(f"[{current_time_str}] 현재 보유 중인 포지션이 없습니다.")
-        _handle_market_close_cleanup(monitor_positions, trade_manager, now)
-        return
-
-    if not monitor_positions.kiwoom_helper.connected_state == 0: 
+    # 💡 Kiwoom API 연결 상태 확인
+    # monitor_positions 객체를 통해 kiwoom_helper에 접근
+    if not monitor_positions.kiwoom_helper.connected_state == 0: # 0: 연결 성공
         logger.warning(f"[{current_time_str}] Kiwoom API 연결 상태 불량. 포지션 모니터링 건너뜁니다.")
         _handle_market_close_cleanup(monitor_positions, trade_manager, now)
         return
 
-    for stock_code, pos_data in current_positions.items():
-        try:
-            if pos_data['quantity'] <= 0: 
-                logger.debug(f"[{current_time_str}] {pos_data.get('name', stock_code)} - 수량 0 또는 음수. 모니터링 건너뛰고 해당 포지션 삭제 시도.")
-                monitor_positions.remove_position(stock_code) 
-                continue
+    # 모든 현재 보유 포지션을 가져옵니다. (MonitorPositions 객체 내부에서 락으로 보호됨)
+    current_positions = monitor_positions.get_all_positions()
 
-            # 💡 current_price는 get_all_positions() 호출 시 이미 real_time_data에서 업데이트되어 있음
-            current_price = pos_data.get('current_price', 0)
-            if current_price == 0: 
-                logger.warning(f"[{current_time_str}] {pos_data.get('name', stock_code)}의 실시간 현재가가 아직 수신되지 않았습니다. 전략 실행에 제한이 있을 수 있습니다.")
-                continue 
+    if not current_positions:
+        logger.info(f"[{current_time_str}] 현재 보유 중인 포지션이 없습니다.")
+        # 장 마감 정리 로직은 포지션 유무와 관계없이 확인되어야 하므로 아래에서 별도로 호출
+    
+    # 💡 매매 시간 (09:05 ~ 15:20)에만 매도 전략 실행 (장 마감 전 정리는 별도 함수에서 처리)
+    if time(9, 5) <= now.time() < time(15, 20): 
+        for stock_code, pos_data in current_positions.items():
+            try:
+                if pos_data['quantity'] <= 0: # 이미 매도 완료된 포지션은 건너뜁니다.
+                    logger.debug(f"[{current_time_str}] {pos_data.get('name', stock_code)} - 수량 0 또는 음수. 모니터링 건너뜁니다.")
+                    # 만약 buy_time이 None이 아닌데 수량이 0이면 파일에서 제거하는 로직을 고려
+                    if pos_data.get('buy_time') and pos_data['quantity'] == 0:
+                         monitor_positions.remove_position(stock_code)
+                    continue
 
-            purchase_price = pos_data['purchase_price']
-            
-            pnl_pct = (current_price - purchase_price) / purchase_price * 100 if purchase_price != 0 else 0
+                # 💡 실시간 현재가 가져오기 (KiwoomQueryHelper의 real_time_data 활용)
+                current_price = monitor_positions.kiwoom_helper.real_time_data.get(stock_code, {}).get('current_price', 0)
+                if current_price == 0:
+                    logger.warning(f"⚠️ {pos_data['name']}({stock_code}) 실시간 현재가 정보 없음. 매도 전략 건너뜀.")
+                    continue
 
-            logger.info(f"🔍 {pos_data.get('name', stock_code)}({stock_code}) | 현재가: {current_price:,}원, 수익률: {pnl_pct:.2f}%, 보유일: {(datetime.now() - datetime.strptime(pos_data.get('buy_date', '1900-01-01'), '%Y-%m-%d')).days}일, 추적고점: {pos_data.get('trail_high', 0.0):,}원")
+                purchase_price = pos_data['purchase_price']
+                quantity = pos_data['quantity']
+                name = pos_data['name']
+                buy_time_str = pos_data.get('buy_time')
+                half_exited = pos_data.get('half_exited', False) # 1차 익절 여부
+                trail_high = pos_data.get('trail_high', current_price) # 트레일링 고점
 
-            action_taken = False 
+                # 매수가 0인 경우 (예: 초기화 오류 등) 방지
+                if purchase_price == 0:
+                    logger.warning(f"⚠️ {name}({stock_code}) 매입가 0. 매도 전략 실행 불가.")
+                    continue
 
-            # 1. 손절 조건 검사 (최우선 순위)
-            if pnl_pct <= STOP_LOSS_PCT:
-                logger.warning(f"❌ 손절 조건 충족: {pos_data.get('name', stock_code)}({stock_code}) 수익률 {pnl_pct:.2f}% (기준: {STOP_LOSS_PCT:.2f}%)")
-                order_quantity = pos_data['quantity']
-                if order_quantity > 0:
-                    result = trade_manager.place_order(stock_code, 2, order_quantity, 0, "03") 
-                    if result["status"] == "success":
-                        send_telegram_message(f"❌ 손절: {pos_data.get('name', stock_code)}({stock_code}) | 수익률: {pnl_pct:.2f}% | 수량: {order_quantity}주")
-                        # 💡 매매 로그 기록
-                        trade_logger.log_trade(
-                            stock_code=stock_code, stock_name=pos_data.get('name'), trade_type="손절",
-                            order_price=0, executed_price=current_price, quantity=order_quantity,
-                            pnl_amount=(current_price - purchase_price) * order_quantity, pnl_pct=pnl_pct,
-                            account_balance_after_trade=trade_manager.kiwoom_tr_request.request_account_info(trade_manager.account_number).get("예수금"), # 매매 후 잔고
-                            strategy_name="StopLoss"
-                        )
-                        action_taken = True
-                    else:
-                        logger.error(f"🔴 손절 주문 실패: {pos_data.get('name', stock_code)}({stock_code}) {result.get('message', '알 수 없는 오류')}")
-            
-            if not action_taken:
-                # 2. 50% 익절 조건 검사
-                if not pos_data.get('half_exited', False) and pnl_pct >= TAKE_PROFIT_PCT:
-                    logger.info(f"🎯 50% 익절 조건 충족: {pos_data.get('name', stock_code)}({stock_code}) 수익률 {pnl_pct:.2f}% (기준: {TAKE_PROFIT_PCT:.2f}%)")
-                    half_qty = (pos_data['quantity'] // 2 // DEFAULT_LOT_SIZE) * DEFAULT_LOT_SIZE
-                    
-                    if half_qty > 0:
-                        result = trade_manager.place_order(stock_code, 2, half_qty, 0, "03") 
-                        if result["status"] == "success":
-                            send_telegram_message(f"🎯 50% 익절: {pos_data.get('name', stock_code)}({stock_code}) | 수익률: {pnl_pct:.2f}% | 수량: {half_qty}주")
-                            # 💡 매매 로그 기록
-                            trade_logger.log_trade(
-                                stock_code=stock_code, stock_name=pos_data.get('name'), trade_type="50%익절",
-                                order_price=0, executed_price=current_price, quantity=half_qty,
-                                pnl_amount=(current_price - purchase_price) * half_qty, pnl_pct=pnl_pct,
-                                account_balance_after_trade=trade_manager.kiwoom_tr_request.request_account_info(trade_manager.account_number).get("예수금"),
-                                strategy_name="TakeProfit50"
-                            )
-                            
-                            monitor_positions.positions[stock_code]["half_exited"] = True
-                            monitor_positions.positions[stock_code]["trail_high"] = current_price 
-                            monitor_positions.save_positions() 
-                            
-                            logger.info(f"업데이트: {pos_data.get('name', stock_code)}({stock_code}) 남은 수량: {monitor_positions.positions[stock_code]['quantity']}주, 추적고점: {monitor_positions.positions[stock_code]['trail_high']:,}원")
-                            action_taken = True
-                        else:
-                            logger.error(f"🔴 50% 익절 주문 실패: {pos_data.get('name', stock_code)}({stock_code}) {result.get('message', '알 수 없는 오류')}")
-                
-            if not action_taken and pos_data.get('half_exited', False):
-                # 3. 트레일링 스탑 조건 검사 (50% 익절 후 잔여 수량에 대해 동작)
-                if current_price > pos_data.get('trail_high', 0.0):
-                    monitor_positions.positions[stock_code]["trail_high"] = current_price
+                pnl_pct = ((current_price - purchase_price) / purchase_price) * 100
+
+                # 💡 트레일링 고점 업데이트 (현재가가 기록된 최고가보다 높으면 갱신)
+                if current_price > trail_high:
+                    pos_data['trail_high'] = current_price
+                    # 이 시점에서 바로 save_positions를 호출하면 I/O가 잦아지므로
+                    # 중요한 상태 변경 시에만 호출하거나 주기적인 전체 저장 로직을 고려
                     monitor_positions.save_positions() 
-                    logger.debug(f"추적고점 업데이트: {pos_data.get('name', stock_code)}({stock_code}) -> {monitor_positions.positions[stock_code]['trail_high']:,}원")
-                elif current_price <= pos_data.get('trail_high', 0.0) * (1 - TRAIL_STOP_PCT / 100):
-                    logger.warning(f"📉 트레일링 스탑 조건 충족: {pos_data.get('name', stock_code)}({stock_code}) 현재가 {current_price}원, 추적고점 {pos_data.get('trail_high', 0.0)}원 (하락률: {((pos_data.get('trail_high', 0.0) - current_price)/pos_data.get('trail_high', 0.0)*100):.2f}%)")
-                    order_quantity = pos_data['quantity']
-                    if order_quantity > 0:
-                        pnl_on_exit = (current_price - purchase_price) / purchase_price * 100 if purchase_price != 0 else 0
-                        result = trade_manager.place_order(stock_code, 2, order_quantity, 0, "03") 
-                        if result["status"] == "success":
-                            send_telegram_message(f"📉 트레일링 스탑: {pos_data.get('name', stock_code)}({stock_code}) | 수익률: {pnl_on_exit:.2f}% | 수량: {order_quantity}주")
-                            # 💡 매매 로그 기록
-                            trade_logger.log_trade(
-                                stock_code=stock_code, stock_name=pos_data.get('name'), trade_type="트레일링스탑",
-                                order_price=0, executed_price=current_price, quantity=order_quantity,
-                                pnl_amount=(current_price - purchase_price) * order_quantity, pnl_pct=pnl_on_exit,
-                                account_balance_after_trade=trade_manager.kiwoom_tr_request.request_account_info(trade_manager.account_number).get("예수금"),
-                                strategy_name="TrailingStop"
-                            )
-                            action_taken = True
-                        else:
-                            logger.error(f"🔴 트레일링 스탑 주문 실패: {pos_data.get('name', stock_code)}({stock_code}) {result.get('message', '알 수 없는 오류')}")
-            
-            if not action_taken:
-                # 4. 최대 보유일 초과 조건 검사 (가장 낮은 순위)
-                if pos_data.get("buy_date") and (datetime.now() - datetime.strptime(pos_data["buy_date"], "%Y-%m-%d")).days >= MAX_HOLD_DAYS:
-                    logger.info(f"⌛ 보유일 초과 조건 충족: {pos_data.get('name', stock_code)}({stock_code}) 보유일 {(datetime.now() - datetime.strptime(pos_data['buy_date'], '%Y-%m-%d')).days}일 (기준: {MAX_HOLD_DAYS}일)")
-                    order_quantity = pos_data['quantity']
-                    if order_quantity > 0:
-                        pnl_on_exit = (current_price - purchase_price) / purchase_price * 100 if purchase_price != 0 else 0
-                        result = trade_manager.place_order(stock_code, 2, order_quantity, 0, "03") 
-                        if result["status"] == "success":
-                            send_telegram_message(f"⌛ 보유일 초과 청산: {pos_data.get('name', stock_code)}({stock_code}) | 수익률: {pnl_on_exit:.2f}% | 수량: {order_quantity}주")
-                            # 💡 매매 로그 기록
-                            trade_logger.log_trade(
-                                stock_code=stock_code, stock_name=pos_data.get('name'), trade_type="보유일초과청산",
-                                order_price=0, executed_price=current_price, quantity=order_quantity,
-                                pnl_amount=(current_price - purchase_price) * order_quantity, pnl_pct=pnl_on_exit,
-                                account_balance_after_trade=trade_manager.kiwoom_tr_request.request_account_info(trade_manager.account_number).get("예수금"),
-                                strategy_name="MaxHoldDaysSell"
-                            )
-                            action_taken = True
-                        else:
-                            logger.error(f"🔴 보유일 초과 청산 주문 실패: {pos_data.get('name', stock_code)}({stock_code}) {result.get('message', '알 수 없는 오류')}")
-            
-        except Exception as e:
-            logger.error(f"[{current_time_str}] {pos_data.get('name', stock_code)} 포지션 모니터링 중 오류 발생: {e}", exc_info=True)
+                    logger.debug(f"DEBUG: {name}({stock_code}) 트레일링 고점 갱신: {trail_high:,} -> {current_price:,}원")
+                
+                # 1. 1차 익절 (매수가 대비 +2.0% 상승 시, 보유 수량의 50% 분할 익절)
+                if pnl_pct >= TAKE_PROFIT_PCT_1ST and quantity > 0 and not half_exited:
+                    sell_quantity = quantity // 2 # 50% 분할 익절
+                    if sell_quantity > 0:
+                        logger.info(f"✅ {name}({stock_code}) 1차 익절 조건 달성 (+{pnl_pct:.2f}%). 50% 분할 매도 시도.")
+                        send_telegram_message(f"✅ 1차 익절: {name}({stock_code}) +{pnl_pct:.2f}% (매수량 50% 매도)")
+                        trade_manager.place_order(stock_code, 2, sell_quantity, 0, "03") # 2: 매도, 03: 시장가
+                        pos_data['half_exited'] = True # 1차 익절 완료 플래그 설정
+                        monitor_positions.save_positions() # 플래그 저장
+                        continue # 다음 종목으로 이동 (매도 주문 보냈으므로 현재 종목은 다음 주기에서 체결 확인)
 
+                # 2. 2차 익절 (트레일링 스탑): 1차 익절 후 남은 수량에 대해, 매수 후 기록된 최고가 대비 -0.8% 하락 시 전량 매도
+                # (1차 익절을 했거나, 애초에 소량이라 1차 익절 수량이 0이었던 경우에도 적용 가능)
+                # 중요한 것은 현재 잔여 수량 (quantity)이 있어야 하고, 최고가 대비 하락폭이 기준 이상이어야 함.
+                drop_from_high_pct = ((trail_high - current_price) / trail_high) * 100 if trail_high != 0 else 0.0
+                if drop_from_high_pct >= TRAIL_STOP_PCT_2ND and quantity > 0:
+                    logger.info(f"✅ {name}({stock_code}) 2차 익절(트레일링 스탑) 조건 달성. 최고가 대비 -{drop_from_high_pct:.2f}%. 전량 매도 시도.")
+                    send_telegram_message(f"✅ 2차 익절(트레일링 스탑): {name}({stock_code}) 최고가 대비 -{drop_from_high_pct:.2f}% (전량 매도)")
+                    trade_manager.place_order(stock_code, 2, quantity, 0, "03") # 전량 매도
+                    # monitor_positions.remove_position(stock_code)는 체결 완료 후 호출됨
+                    continue
+
+                # 3. 손절 (매수가 대비 -1.2% 하락 시 전량 손절)
+                if pnl_pct <= STOP_LOSS_PCT_ABS and quantity > 0:
+                    logger.warning(f"🚨 {name}({stock_code}) 손절 조건 달성 ({pnl_pct:.2f}%). 전량 손절 시도.")
+                    send_telegram_message(f"🚨 손절: {name}({stock_code}) {pnl_pct:.2f}% (전량 매도)")
+                    trade_manager.place_order(stock_code, 2, quantity, 0, "03") # 전량 매도
+                    # monitor_positions.remove_position(stock_code)는 체결 완료 후 호출됨
+                    continue
+
+                # 4. 시간 손절 (매수 후 TIME_STOP_MINUTES 분 이내에 어떤 조건도 충족되지 않을 경우 전량 매도)
+                # buy_time이 설정되어 있어야 하고, 현재 시간이 매수 시간 + 기준 시간 이상이어야 함
+                if buy_time_str:
+                    buy_time_dt = datetime.strptime(buy_time_str, "%Y-%m-%d %H:%M:%S")
+                    time_since_buy = now - buy_time_dt
+                    
+                    # 15분 경과 여부 확인 (TIME_STOP_MINUTES 사용)
+                    if time_since_buy.total_seconds() >= TIME_STOP_MINUTES * 60 and quantity > 0:
+                        # 1차 익절을 하지 않았고, 아직 익절/손절 범위에 도달하지 않은 경우에만 시간 손절 적용
+                        # 즉, 애매한 포지션일 때만 시간 손절
+                        if not half_exited and (STOP_LOSS_PCT_ABS < pnl_pct < TAKE_PROFIT_PCT_1ST):
+                            logger.warning(f"🚨 {name}({stock_code}) 시간 손절 조건 달성 ({TIME_STOP_MINUTES}분 경과). 전량 매도 시도.")
+                            send_telegram_message(f"🚨 시간 손절: {name}({stock_code}) {TIME_STOP_MINUTES}분 경과 (전량 매도)")
+                            trade_manager.place_order(stock_code, 2, quantity, 0, "03") # 전량 매도
+                            continue
+
+                # 5. 최대 보유 기간 초과 시 강제 청산 (MAX_HOLD_DAYS 활용)
+                if pos_data.get("buy_date"): # buy_date가 존재할 경우에만 확인
+                    buy_date_dt = datetime.strptime(pos_data["buy_date"], "%Y-%m-%d")
+                    hold_days = (now.date() - buy_date_dt.date()).days # 일 단위 차이
+                    
+                    if hold_days >= MAX_HOLD_DAYS and quantity > 0:
+                        logger.warning(f"🚨 {name}({stock_code}) 최대 보유 기간 초과 ({hold_days}일). 전량 강제 청산 시도.")
+                        send_telegram_message(f"🚨 기간 초과 청산: {name}({stock_code}) {hold_days}일 보유 (전량 매도)")
+                        trade_manager.place_order(stock_code, 2, quantity, 0, "03") # 전량 시장가 매도
+                        continue
+
+
+                logger.debug(f"[{current_time_str}] {name}({stock_code}) 현재가: {current_price:,}원, 매입가: {purchase_price:,}원, 수익률: {pnl_pct:.2f}%")
+
+            except Exception as e:
+                logger.error(f"[{current_time_str}] {pos_data.get('name', stock_code)} 포지션 모니터링 중 오류 발생: {e}", exc_info=True)
+        
+    # 장 마감 시간 정리 로직 (모든 포지션을 순회한 후에 실행)
     _handle_market_close_cleanup(monitor_positions, trade_manager, now)
     
     logger.info(f"[{current_time_str}] 포지션 모니터링 및 매매 전략 실행 종료.")
 
+
 def _handle_market_close_cleanup(monitor_positions, trade_manager, now):
+    """
+    장 마감 임박 시 잔여 포지션을 정리하는 로직.
+    """
     current_time_str = get_current_time_str()
-    # 장 마감 15:00 ~ 15:20 사이에 잔여 포지션 강제 청산 (시장가)
+    # 장 마감 직전 정리 시간 (예: 15:00 ~ 15:20)
+    # NOTE: 15:20 부터는 동시호가이므로, 15:20 이전까지는 시장가 매도가 유효함
     if time(15, 0) <= now.time() < time(15, 20):
         logger.info(f"[{current_time_str}] 장 마감 전 포지션 정리 시간.")
         for stock_code, pos_data in monitor_positions.get_all_positions().items():
-            if pos_data['quantity'] > 0: # 아직 보유 중인 종목만 해당
+            if pos_data['quantity'] > 0: # 아직 보유 중인 포지션이 있다면
                 logger.warning(f"[{current_time_str}] 장 마감 임박. {pos_data['name']}({stock_code}) 잔여 포지션 강제 청산 시도.")
-                # 주문 실행: "2"는 매도, "03"은 시장가 (키움 API 주문 유형)
-                result = trade_manager.place_order(stock_code, 2, pos_data['quantity'], 0, "03") 
-                if result["status"] == "success":
-                    send_telegram_message(f"🚨 장 마감 강제 청산: {pos_data['name']}({stock_code}) | 수량: {pos_data['quantity']}주")
-                    # 💡 매매 로그 기록
-                    trade_logger.log_trade(
-                        stock_code=stock_code, stock_name=pos_data.get('name'), trade_type="장마감청산",
-                        order_price=0, executed_price=pos_data.get('current_price', 0), quantity=pos_data['quantity'],
-                        pnl_amount=(pos_data.get('current_price', 0) - pos_data.get('purchase_price',0)) * pos_data['quantity'], 
-                        pnl_pct=(pos_data.get('current_price', 0) - pos_data.get('purchase_price',0)) / pos_data.get('purchase_price',1) * 100 if pos_data.get('purchase_price',1) != 0 else 0,
-                        account_balance_after_trade=trade_manager.kiwoom_tr_request.request_account_info(trade_manager.account_number).get("예수금"),
-                        strategy_name="MarketCloseSell"
-                    )
-                else:
-                    logger.error(f"🔴 장 마감 강제 청산 주문 실패: {pos_data['name']}({stock_code}) {result.get('message', '알 수 없는 오류')}")
+                send_telegram_message(f"🚨 장 마감 정리: {pos_data['name']}({stock_code}) 전량 시장가 매도 주문.")
+                trade_manager.place_order(stock_code, 2, pos_data['quantity'], 0, "03") # 2: 매도, 03: 시장가
+                # 주문 성공 여부와 상관없이 로그 남기고, 실제 체결은 TradeManager 이벤트에서 처리
+                # monitor_positions.remove_position(stock_code) 는 체결 완료 후 TradeManager에서 호출됨
 
-    elif now.time() >= time(15, 20) and now.time() < time(15, 30):
+    # 장 마감 후 또는 개장 전 시간대는 매매 활동이 없으므로 정보성 로그만 남김
+    elif now.time() >= time(15, 20) and now.time() < time(15, 30): # 장 마감 동시호가 시간
         logger.info(f"[{current_time_str}] 장 마감 동시호가 시간. 추가 매매/매도 불가.")
-    elif now.time() >= time(15, 30) or now.time() < time(9, 0):
+    elif now.time() >= time(15, 30) or now.time() < time(9, 0): # 장 종료 후/개장 전
         logger.info(f"[{current_time_str}] 현재 매매 시간 아님. 대기 중...")

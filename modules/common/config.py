@@ -19,7 +19,7 @@ DATA_DIR = os.path.join(BASE_DIR, 'data') # data 폴더 경로
 # 데이터 폴더가 없으면 생성
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# 💡 포지션 파일 경로 추가
+# 💡 포지션 파일 및 로그 DB 경로
 POSITIONS_FILE_PATH = os.path.join(DATA_DIR, 'positions.json')
 TRADE_LOG_DB_PATH = os.path.join(DATA_DIR, 'trade_log.db')
 
@@ -55,5 +55,6 @@ MAX_BUY_ATTEMPTS = 3 # 매수 주문 시도 횟수 (지정가 -> 시장가 재�
 TAKE_PROFIT_PCT_1ST = 2.0 # 1차 익절 +2.0%
 TRAIL_STOP_PCT_2ND = 0.8 # 2차 익절 (트레일링 스탑) -0.8% 하락
 STOP_LOSS_PCT_ABS = -1.2 # 절대 손절 -1.2%
-TIME_STOP_MINUTES = 15 # 시간 손절 15분
+TIME_STOP_MINUTES = 15 # 시간 손절 (매수 후 15분 경과 시)
+MAX_HOLD_DAYS = 5 # 💡 최대 보유 기간 (5일 초과 시 강제 청산)
 
