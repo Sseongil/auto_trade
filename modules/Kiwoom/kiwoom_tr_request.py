@@ -16,39 +16,46 @@ class KiwoomTrRequest:
         self.tr_data = None 
         self.rq_name = None 
 
+        # TR 응답 대기를 위한 전용 QEventLoop와 QTimer
         self.tr_wait_event_loop = QEventLoop()
         self.tr_wait_timer = QTimer()
         self.tr_wait_timer.setSingleShot(True) 
         self.tr_wait_timer.timeout.connect(self._on_tr_timeout) 
 
+        # QAxWidget의 OnReceiveTrData 이벤트를 연결합니다.
         self.kiwoom_helper.ocx.OnReceiveTrData.connect(self._on_receive_tr_data)
         logger.info(f"{get_current_time_str()}: KiwoomTrRequest initialized.")
 
     def _on_receive_tr_data(self, screen_no, rq_name, tr_code, record_name, sPrevNext, data_len, err_code, msg1, msg2):
+        """TR 데이터 수신 이벤트 핸들러"""
+        # TR 대기 타이머가 활성 상태라면 중지
         if self.tr_wait_timer.isActive():
             self.tr_wait_timer.stop()
 
-        if rq_name == self.rq_name: 
+        if rq_name == self.rq_name: # 현재 요청 중인 TR에 대한 응답인 경우
             try:
                 # opw00001 (예수금상세현황요청) 처리
                 if tr_code == "opw00001":
-                    deposit = self.kiwoom_helper.ocx.CommGetData(
+                    # CommGetData는 KiwoomQueryHelper의 래퍼 함수를 사용합니다.
+                    deposit = self.kiwoom_helper.CommGetData(
                         tr_code, "", rq_name, 0, "예수금" 
                     )
+                    # 데이터가 올바르게 문자열로 오는지 확인하고 정수형으로 변환
                     self.tr_data = {"예수금": int(deposit.strip()) if deposit.strip() else 0}
                     logger.info(f"TR 데이터 수신: {tr_code} - 예수금: {self.tr_data['예수금']}")
                 
                 # opw00018 (계좌평가현황요청) 처리 - 멀티 데이터 파싱
                 elif tr_code == "opw00018":
-                    cnt = self.kiwoom_helper.ocx.GetRepeatCnt(tr_code, rq_name)
+                    # GetRepeatCnt와 CommGetData는 KiwoomQueryHelper의 래퍼 함수를 사용합니다.
+                    cnt = self.kiwoom_helper.GetRepeatCnt(tr_code, rq_name)
                     holdings_list = []
                     for i in range(cnt):
-                        item_name = self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "종목명").strip()
-                        stock_code = self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "종목번호").strip()
-                        current_qty = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "보유수량").strip())
-                        purchase_price = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "매입단가").strip())
-                        current_price = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "현재가").strip())
-                        total_purchase_amount = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "매입금액").strip())
+                        item_name = self.kiwoom_helper.CommGetData(tr_code, "", rq_name, i, "종목명").strip()
+                        stock_code = self.kiwoom_helper.CommGetData(tr_code, "", rq_name, i, "종목번호").strip()
+                        current_qty = int(self.kiwoom_helper.CommGetData(tr_code, "", rq_name, i, "보유수량").strip())
+                        purchase_price = int(self.kiwoom_helper.CommGetData(tr_code, "", rq_name, i, "매입단가").strip())
+                        current_price = int(self.kiwoom_helper.CommGetData(tr_code, "", rq_name, i, "현재가").strip())
+                        total_purchase_amount = int(self.kiwoom_helper.CommGetData(tr_code, "", rq_name, i, "매입금액").strip())
                         
                         # 종목코드에서 'A' 접두사 제거 (Kiwoom API 특성)
                         if stock_code.startswith('A'):
@@ -66,14 +73,11 @@ class KiwoomTrRequest:
                     self.tr_data = {"holdings": holdings_list} # "holdings" 키로 데이터를 저장
                     logger.info(f"TR 데이터 수신: {tr_code} - 보유 종목 {len(holdings_list)}개.")
 
-                # TODO: 여기에 다른 TR 코드에 대한 처리 로직 추가 (예: OPT10081 등)
-                # elif tr_code == "OPT10081":
-                #     pass 
-
             except Exception as e:
                 logger.error(f"Error processing TR data for {tr_code}: {e}", exc_info=True)
                 self.tr_data = {"error": f"TR 데이터 처리 오류: {str(e)}"}
             finally:
+                # TR 응답을 받았으므로 전용 이벤트 루프 종료 (블로킹 해제)
                 if self.tr_wait_event_loop.isRunning(): 
                     self.tr_wait_event_loop.exit()
         
@@ -82,7 +86,7 @@ class KiwoomTrRequest:
         if self.tr_wait_event_loop.isRunning(): 
             logger.error(f"[{get_current_time_str()}]: ❌ TR 요청 실패 - 타임아웃 ({self.rq_name}, {self.tr_wait_timer.interval()}ms)")
             self.tr_data = {"error": f"TR 요청 타임아웃 ({self.rq_name})"}
-            self.tr_wait_event_loop.exit()
+            self.tr_wait_event_loop.exit() # 이벤트 루프 강제 종료
 
     def _send_tr_request(self, rq_name, tr_code, sPrevNext, screen_no, timeout_ms=30000, retry_attempts=5, retry_delay_sec=5):
         """
@@ -140,10 +144,11 @@ class KiwoomTrRequest:
         """
         예수금 등 계좌 잔고 정보 요청 (opw00001)
         """
+        # KOA StudioSA 예제에 맞춰 모든 입력값을 명시적으로 설정
         self.kiwoom_helper.ocx.SetInputValue("계좌번호", account_no)
-        self.kiwoom_helper.ocx.SetInputValue("비밀번호", "") 
-        self.kiwoom_helper.ocx.SetInputValue("비밀번호입력매체구분", "00") 
-        self.kiwoom_helper.ocx.SetInputValue("조회구분", "2") 
+        self.kiwoom_helper.ocx.SetInputValue("비밀번호", "") # 사용 안 함 (공백)
+        self.kiwoom_helper.ocx.SetInputValue("비밀번호입력매체구분", "00") # 00 (공백불가)
+        self.kiwoom_helper.ocx.SetInputValue("조회구분", "2") # 2:일반조회
 
         screen_no = self._generate_unique_screen_no() 
 
@@ -156,7 +161,7 @@ class KiwoomTrRequest:
         리스트 형태의 보유 종목 데이터를 반환합니다.
         """
         self.kiwoom_helper.ocx.SetInputValue("계좌번호", account_no)
-        # opw00018의 입력값은 계좌번호만 필요합니다.
+        # opw00018의 입력값은 계좌번호만 필요합니다. (KOA StudioSA에서 확인)
 
         screen_no = self._generate_unique_screen_no()
 
@@ -173,11 +178,16 @@ class KiwoomTrRequest:
 
 
     def _generate_unique_screen_no(self):
+        """
+        중복되지 않는 고유한 화면번호를 생성하여 반환합니다.
+        화면번호는 2000 ~ 9999 사이의 값을 사용합니다.
+        """
         unique_part = str(int(time.time() * 100000))[-4:] 
         screen_no = str(2000 + int(unique_part) % 7999) 
         return screen_no
 
     def _get_error_message(self, err_code):
+        """Kiwoom API 에러 코드에 대한 설명을 반환합니다."""
         error_map = {
             0: "정상 처리",
             -10: "미접속",
