@@ -1,50 +1,37 @@
 # modules/trade_logger.py
 
-import os
 import sqlite3
+import os
 import logging
 from datetime import datetime
 
-# common 모듈의 config와 utils를 임포트 (경로 주의)
-from modules.common.config import LOG_DB_PATH
+# 💡 LOG_DB_PATH 대신 TRADE_LOG_DB_PATH 임포트
+from modules.common.config import TRADE_LOG_DB_PATH 
 from modules.common.utils import get_current_time_str
 
 logger = logging.getLogger(__name__)
 
 class TradeLogger:
-    def __init__(self, db_path=LOG_DB_PATH):
-        self.db_path = db_path
-        self._ensure_db_directory_exists()
-        self._create_table()
+    def __init__(self):
+        self.db_path = TRADE_LOG_DB_PATH
+        self._ensure_db_and_table()
         logger.info(f"{get_current_time_str()}: TradeLogger initialized. DB Path: {self.db_path}")
 
-    def _ensure_db_directory_exists(self):
-        """DB 파일이 저장될 디렉토리가 존재하는지 확인하고 없으면 생성합니다."""
-        db_dir = os.path.dirname(self.db_path)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir)
-            logger.info(f"Created directory for DB: {db_dir}")
-
-    def _get_db_connection(self):
-        """SQLite 데이터베이스 연결을 반환합니다."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row # 결과를 딕셔너리처럼 접근할 수 있도록 설정
-        return conn
-
-    def _create_table(self):
-        """매매 로그를 저장할 테이블을 생성합니다 (테이블이 없으면)."""
+    def _ensure_db_and_table(self):
+        """데이터베이스 파일과 trade_logs 테이블이 존재하는지 확인하고 없으면 생성합니다."""
+        conn = None
         try:
-            conn = self._get_db_connection()
+            conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trade_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
                     stock_code TEXT NOT NULL,
-                    stock_name TEXT,
+                    stock_name TEXT NOT NULL,
                     trade_type TEXT NOT NULL,
                     order_price REAL,
-                    executed_price REAL NOT NULL,
+                    executed_price REAL,
                     quantity INTEGER NOT NULL,
                     pnl_amount REAL,
                     pnl_pct REAL,
@@ -53,94 +40,110 @@ class TradeLogger:
                 )
             """)
             conn.commit()
-            conn.close()
             logger.info("Trade_logs table checked/created successfully.")
-        except Exception as e:
-            logger.error(f"Error creating trade_logs table: {e}", exc_info=True)
+        except sqlite3.Error as e:
+            logger.error(f"Error ensuring DB and table: {e}", exc_info=True)
+        finally:
+            if conn:
+                conn.close()
 
-    def log_trade(self, stock_code, stock_name, trade_type, order_price, executed_price, quantity, 
-                  pnl_amount=None, pnl_pct=None, account_balance_after_trade=None, strategy_name=None):
+    def log_trade(self, stock_code, stock_name, trade_type, order_price, executed_price, 
+                  quantity, pnl_amount, pnl_pct, account_balance_after_trade, strategy_name="N/A"):
         """
-        매매 내역을 데이터베이스에 기록합니다.
-
+        거래 내역을 데이터베이스에 기록합니다.
+        
         Args:
             stock_code (str): 종목 코드
             stock_name (str): 종목명
-            trade_type (str): 매매 유형 (예: "매수", "매도", "손절", "익절")
-            order_price (float): 주문 가격 (지정가), 시장가면 0 또는 None
-            executed_price (float): 실제 체결 가격
+            trade_type (str): 거래 유형 ('매수', '매도', '익절', '손절', '보유종료')
+            order_price (float): 주문 가격
+            executed_price (float): 체결 가격
             quantity (int): 거래 수량
-            pnl_amount (float, optional): 해당 거래로 발생한 손익 금액. Defaults to None.
-            pnl_pct (float, optional): 해당 거래로 발생한 손익률. Defaults to None.
-            account_balance_after_trade (float, optional): 거래 후 계좌 잔고. Defaults to None.
-            strategy_name (str, optional): 해당 매매를 발생시킨 전략 이름. Defaults to None.
+            pnl_amount (float): 손익 금액 (매도 시에만 유효)
+            pnl_pct (float): 손익률 (%) (매도 시에만 유효)
+            account_balance_after_trade (float): 거래 후 계좌 예수금 (또는 총자산)
+            strategy_name (str): 사용된 전략명 (기본값 "N/A")
         """
+        conn = None
         try:
-            conn = self._get_db_connection()
+            conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
             cursor.execute("""
-                INSERT INTO trade_logs (
-                    timestamp, stock_code, stock_name, trade_type, order_price, 
-                    executed_price, quantity, pnl_amount, pnl_pct, 
-                    account_balance_after_trade, strategy_name
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                timestamp, stock_code, stock_name, trade_type, order_price, 
-                executed_price, quantity, pnl_amount, pnl_pct, 
-                account_balance_after_trade, strategy_name
-            ))
+                INSERT INTO trade_logs (timestamp, stock_code, stock_name, trade_type, 
+                                        order_price, executed_price, quantity, 
+                                        pnl_amount, pnl_pct, account_balance_after_trade, strategy_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (timestamp, stock_code, stock_name, trade_type, 
+                  order_price, executed_price, quantity, 
+                  pnl_amount, pnl_pct, account_balance_after_trade, strategy_name))
             conn.commit()
-            conn.close()
-            logger.info(f"Trade logged: {trade_type} {stock_name}({stock_code}) Qty:{quantity} Price:{executed_price}")
-        except Exception as e:
-            logger.error(f"Error logging trade for {stock_name}({stock_code}): {e}", exc_info=True)
+            logger.info(f"📊 Trade logged: [{trade_type}] {stock_name}({stock_code}), Qty: {quantity}, Price: {executed_price}")
+        except sqlite3.Error as e:
+            logger.error(f"Error logging trade: {e}", exc_info=True)
+        finally:
+            if conn:
+                conn.close()
 
-    def get_all_trades(self):
-        """데이터베이스에 기록된 모든 매매 내역을 조회하여 반환합니다."""
+    def get_trades(self, limit=100):
+        """최근 거래 내역을 조회합니다."""
+        conn = None
         try:
-            conn = self._get_db_connection()
+            conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM trade_logs ORDER BY timestamp ASC")
-            trades = cursor.fetchall()
-            conn.close()
-            # SQLite.Row 객체를 딕셔너리 리스트로 변환하여 반환
-            return [dict(row) for row in trades]
-        except Exception as e:
-            logger.error(f"Error retrieving all trades: {e}", exc_info=True)
+            cursor.execute("SELECT * FROM trade_logs ORDER BY timestamp DESC LIMIT ?", (limit,))
+            rows = cursor.fetchall()
+            columns = [description[0] for description in cursor.description]
+            return [dict(zip(columns, row)) for row in rows]
+        except sqlite3.Error as e:
+            logger.error(f"Error fetching trades: {e}", exc_info=True)
             return []
+        finally:
+            if conn:
+                conn.close()
 
-    def get_trades_by_date_range(self, start_date, end_date):
-        """특정 기간 내의 매매 내역을 조회하여 반환합니다. (YYYY-MM-DD 형식)"""
-        try:
-            conn = self._get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM trade_logs 
-                WHERE timestamp BETWEEN ? AND ? 
-                ORDER BY timestamp ASC
-            """, (f"{start_date} 00:00:00", f"{end_date} 23:59:59"))
-            trades = cursor.fetchall()
-            conn.close()
-            return [dict(row) for row in trades]
-        except Exception as e:
-            logger.error(f"Error retrieving trades by date range: {e}", exc_info=True)
-            return []
+    def get_daily_summary(self, date_str=None):
+        """특정 날짜의 매매 요약을 반환합니다 (YYYY-MM-DD 형식)."""
+        if date_str is None:
+            date_str = datetime.today().strftime("%Y-%m-%d")
 
-    def get_trades_by_stock_code(self, stock_code):
-        """특정 종목 코드의 매매 내역을 조회하여 반환합니다."""
+        conn = None
         try:
-            conn = self._get_db_connection()
+            conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM trade_logs 
-                WHERE stock_code = ? 
-                ORDER BY timestamp ASC
-            """, (stock_code,))
-            trades = cursor.fetchall()
-            conn.close()
-            return [dict(row) for row in trades]
-        except Exception as e:
-            logger.error(f"Error retrieving trades by stock code {stock_code}: {e}", exc_info=True)
-            return []
+            
+            # 총 거래 횟수
+            cursor.execute("SELECT COUNT(*) FROM trade_logs WHERE DATE(timestamp) = ?", (date_str,))
+            total_trades = cursor.fetchone()[0]
+
+            # 총 손익 금액 및 수익률
+            cursor.execute("SELECT SUM(pnl_amount), AVG(pnl_pct) FROM trade_logs WHERE DATE(timestamp) = ? AND (trade_type = '매도' OR trade_type = '익절' OR trade_type = '손절' OR trade_type = '보유종료')", (date_str,))
+            total_pnl_amount, avg_pnl_pct = cursor.fetchone()
+            total_pnl_amount = total_pnl_amount if total_pnl_amount is not None else 0.0
+            avg_pnl_pct = avg_pnl_pct if avg_pnl_pct is not None else 0.0
+
+            # 승리/패배 횟수
+            cursor.execute("SELECT COUNT(*) FROM trade_logs WHERE DATE(timestamp) = ? AND (trade_type = '매도' OR trade_type = '익절' OR trade_type = '손절' OR trade_type = '보유종료') AND pnl_amount > 0", (date_str,))
+            win_trades = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM trade_logs WHERE DATE(timestamp) = ? AND (trade_type = '매도' OR trade_type = '익절' OR trade_type = '손절' OR trade_type = '보유종료') AND pnl_amount <= 0", (date_str,))
+            loss_trades = cursor.fetchone()[0]
+
+            win_rate = (win_trades / (win_trades + loss_trades)) * 100 if (win_trades + loss_trades) > 0 else 0.0
+
+            return {
+                "date": date_str,
+                "total_trades": total_trades,
+                "total_pnl_amount": total_pnl_amount,
+                "avg_pnl_pct": avg_pnl_pct,
+                "win_trades": win_trades,
+                "loss_trades": loss_trades,
+                "win_rate": win_rate
+            }
+
+        except sqlite3.Error as e:
+            logger.error(f"Error fetching daily summary for {date_str}: {e}", exc_info=True)
+            return None
+        finally:
+            if conn:
+                conn.close()
+
