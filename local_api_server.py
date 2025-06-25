@@ -114,8 +114,9 @@ def initialize_kiwoom_api_in_background_thread():
                 logger.warning(f"CoUninitialize 중 오류 발생: {e_uninit}")
             return False, None, None, None, None
 
+        # .strip()을 추가하여 환경 변수 값의 앞뒤 공백 제거
         account_number = get_env("ACCOUNT_NUMBERS", "").split(',')[0].strip()
-        account_password = get_env("ACCOUNT_PASSWORD", "") # .env에서 계좌 비밀번호 로드
+        account_password = get_env("ACCOUNT_PASSWORD", "").strip() 
         
         if not account_number:
             account_number_from_api = kiwoom_helper_thread.get_login_info("ACCNO")
