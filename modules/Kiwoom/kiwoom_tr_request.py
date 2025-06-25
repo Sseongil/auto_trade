@@ -13,246 +13,171 @@ class KiwoomTrRequest:
         self.kiwoom_helper = kiwoom_helper 
         self.pyqt_app = pyqt_app_instance 
         
-        self.tr_event_loop = QEventLoop()
-        self.tr_timer = QTimer()
-        self.tr_timer.setSingleShot(True) 
-        self.tr_timer.timeout.connect(self._on_tr_timeout) 
-        
         self.tr_data = None 
         self.rq_name = None 
+
+        self.tr_wait_event_loop = QEventLoop()
+        self.tr_wait_timer = QTimer()
+        self.tr_wait_timer.setSingleShot(True) 
+        self.tr_wait_timer.timeout.connect(self._on_tr_timeout) 
 
         self.kiwoom_helper.ocx.OnReceiveTrData.connect(self._on_receive_tr_data)
         logger.info(f"{get_current_time_str()}: KiwoomTrRequest initialized.")
 
-    def _on_tr_timeout(self):
-        """TR 요청 타임아웃 발생 시 호출되는 콜백."""
-        if self.tr_event_loop.isRunning():
-            logger.error(f"[{get_current_time_str()}]: ❌ TR 요청 타임아웃 발생: {self.rq_name}")
-            self.tr_data = {"error": f"TR 요청 타임아웃: {self.rq_name}"}
-            self.tr_event_loop.exit() 
-
     def _on_receive_tr_data(self, screen_no, rq_name, tr_code, record_name, sPrevNext, data_len, err_code, msg1, msg2):
-        """TR 데이터 수신 이벤트 핸들러"""
-        if rq_name == self.rq_name: 
-            if self.tr_timer.isActive():
-                self.tr_timer.stop()
+        if self.tr_wait_timer.isActive():
+            self.tr_wait_timer.stop()
 
+        if rq_name == self.rq_name: 
             try:
-                if tr_code == "opw00001": # 계좌 정보 요청 (예수금)
+                # opw00001 (예수금상세현황요청) 처리
+                if tr_code == "opw00001":
                     deposit = self.kiwoom_helper.ocx.CommGetData(
                         tr_code, "", rq_name, 0, "예수금" 
                     )
-                    self.tr_data = {"예수금": int(deposit.strip())} 
-                    logger.info(f"TR 데이터 수신: {tr_code} - 예수금: {deposit.strip()}")
+                    self.tr_data = {"예수금": int(deposit.strip()) if deposit.strip() else 0}
+                    logger.info(f"TR 데이터 수신: {tr_code} - 예수금: {self.tr_data['예수금']}")
                 
-                elif tr_code == "OPT10081": # 주식 일봉 차트 요청
-                    data_cnt = self.kiwoom_helper.ocx.GetRepeatCnt(tr_code, rq_name)
-                    daily_data_list = []
-                    for i in range(data_cnt):
-                        date = self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "일자").strip()
-                        open_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "시가").strip()))
-                        high_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "고가").strip()))
-                        low_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "저가").strip()))
-                        close_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "현재가").strip())) 
-                        volume = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "거래량").strip()))
-                        
-                        daily_data_list.append({
-                            "날짜": date, "시가": open_price, "고가": high_price, 
-                            "저가": low_price, "현재가": close_price, "거래량": volume
-                        })
-                    self.tr_data = {"data": daily_data_list, "sPrevNext": sPrevNext}
-                    logger.info(f"TR 데이터 수신: {tr_code} - {data_cnt}개 일봉 데이터")
-                
-                elif tr_code == "OPT10080": # 주식 분봉/틱봉 차트 요청
-                    data_cnt = self.kiwoom_helper.ocx.GetRepeatCnt(tr_code, rq_name)
-                    five_min_data_list = []
-                    for i in range(data_cnt):
-                        date_time = self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "체결시간").strip()
-                        open_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "시가").strip()))
-                        high_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "고가").strip()))
-                        low_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "저가").strip()))
-                        close_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "현재가").strip())) 
-                        volume = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "거래량").strip()))
-                        
-                        five_min_data_list.append({
-                            "체결시간": date_time, "시가": open_price, "고가": high_price, 
-                            "저가": low_price, "현재가": close_price, "거래량": volume
-                        })
-                    self.tr_data = {"data": five_min_data_list, "sPrevNext": sPrevNext}
-                    logger.info(f"TR 데이터 수신: {tr_code} - {data_cnt}개 5분봉 데이터")
-
-                elif tr_code == "OPT10001": # 주식 기본 정보 요청 (시가총액 등)
-                    import re
-                    market_cap_str = self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, 0, "시가총액").strip()
-                    market_cap = 0
-                    if market_cap_str:
-                        numeric_part = re.sub(r'[^0-9]', '', market_cap_str)
-                        if numeric_part:
-                            market_cap = int(numeric_part)
-                    
-                    stock_basic_info = {
-                        "종목코드": self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, 0, "종목코드").strip(),
-                        "종목명": self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, 0, "종목명").strip(),
-                        "시가총액": market_cap, 
-                        "현재가": abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, 0, "현재가").strip())),
-                    }
-                    self.tr_data = stock_basic_info
-                    logger.info(f"TR 데이터 수신: {tr_code} - {stock_basic_info.get('종목명')} 기본 정보")
-
+                # opw00018 (계좌평가현황요청) 처리 - 멀티 데이터 파싱
                 elif tr_code == "opw00018":
-                    total_valuation_amount = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, 0, "총평가금액").strip())
-                    total_profit_loss_amount = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, 0, "총손익금액").strip())
-                    total_profit_loss_rate = float(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, 0, "총수익률(%)").strip())
-
-                    data_cnt = self.kiwoom_helper.ocx.GetRepeatCnt(tr_code, rq_name)
+                    cnt = self.kiwoom_helper.ocx.GetRepeatCnt(tr_code, rq_name)
                     holdings_list = []
-                    for i in range(data_cnt):
-                        stock_code = self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "종목번호").strip().replace('A', '') 
-                        stock_name = self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "종목명").strip()
-                        quantity = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "보유수량").strip())
-                        purchase_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "매입가").strip()))
-                        current_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "현재가").strip()))
-                        profit_loss = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "평가손익").strip())
-                        profit_loss_rate = float(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "수익률(%)").strip())
+                    for i in range(cnt):
+                        item_name = self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "종목명").strip()
+                        stock_code = self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "종목번호").strip()
+                        current_qty = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "보유수량").strip())
+                        purchase_price = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "매입단가").strip())
+                        current_price = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "현재가").strip())
+                        total_purchase_amount = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "매입금액").strip())
                         
-                        holdings_list.append({
-                            "종목코드": stock_code,
-                            "종목명": stock_name,
-                            "보유수량": quantity,
-                            "매입가": purchase_price,
-                            "현재가": current_price,
-                            "평가손익": profit_loss,
-                            "수익률(%)": profit_loss_rate
-                        })
-                    
-                    self.tr_data = {
-                        "total_info": {
-                            "총평가금액": total_valuation_amount,
-                            "총손익금액": total_profit_loss_amount,
-                            "총수익률(%)": total_profit_loss_rate
-                        },
-                        "data": holdings_list, 
-                        "sPrevNext": sPrevNext 
-                    }
-                    logger.info(f"TR 데이터 수신: {tr_code} - {len(holdings_list)}개 보유 종목")
+                        # 종목코드에서 'A' 접두사 제거 (Kiwoom API 특성)
+                        if stock_code.startswith('A'):
+                            stock_code = stock_code[1:]
 
+                        if current_qty > 0: # 수량이 0 이상인 종목만 유효한 포지션으로 간주
+                            holdings_list.append({
+                                "stock_code": stock_code,
+                                "name": item_name,
+                                "quantity": current_qty,
+                                "purchase_price": purchase_price,
+                                "current_price": current_price,
+                                "total_purchase_amount": total_purchase_amount,
+                            })
+                    self.tr_data = {"holdings": holdings_list} # "holdings" 키로 데이터를 저장
+                    logger.info(f"TR 데이터 수신: {tr_code} - 보유 종목 {len(holdings_list)}개.")
+
+                # TODO: 여기에 다른 TR 코드에 대한 처리 로직 추가 (예: OPT10081 등)
+                # elif tr_code == "OPT10081":
+                #     pass 
 
             except Exception as e:
                 logger.error(f"Error processing TR data for {tr_code}: {e}", exc_info=True)
-                self.tr_data = {"error": str(e)}
+                self.tr_data = {"error": f"TR 데이터 처리 오류: {str(e)}"}
             finally:
-                if self.tr_event_loop.isRunning():
-                    self.tr_event_loop.exit()
+                if self.tr_wait_event_loop.isRunning(): 
+                    self.tr_wait_event_loop.exit()
         
-    def _send_tr_request(self, rq_name, tr_code, sPrevNext, screen_no, timeout_ms=30000, retry_attempts=5, retry_delay_sec=5): # 💡 retry_delay_sec 증가
+    def _on_tr_timeout(self):
+        """TR 요청 타임아웃 발생 시 호출되는 콜백."""
+        if self.tr_wait_event_loop.isRunning(): 
+            logger.error(f"[{get_current_time_str()}]: ❌ TR 요청 실패 - 타임아웃 ({self.rq_name}, {self.tr_wait_timer.interval()}ms)")
+            self.tr_data = {"error": f"TR 요청 타임아웃 ({self.rq_name})"}
+            self.tr_wait_event_loop.exit()
+
+    def _send_tr_request(self, rq_name, tr_code, sPrevNext, screen_no, timeout_ms=30000, retry_attempts=5, retry_delay_sec=5):
         """
         CommRqData를 호출하고 TR 응답을 기다리는 헬퍼 함수.
         TR 요청 실패 시 재시도 로직을 포함합니다.
         """
         for attempt in range(retry_attempts):
             self.rq_name = rq_name
-            self.tr_data = None 
+            self.tr_data = None # 이전 데이터 초기화
 
-            logger.debug(f"TR 요청 시도 {attempt + 1}/{retry_attempts}: rq_name='{rq_name}', tr_code='{tr_code}', sPrevNext={sPrevNext}, screen_no='{screen_no}'")
+            logger.debug(f"TR 요청 시도 {attempt + 1}/{retry_attempts}: rq_name='{rq_name}', tr_code='{tr_code}', screen_no='{screen_no}'")
             
-            time.sleep(0.2) 
+            # API 요청 간 최소 지연 시간 (TR 요청 제한 회피)
+            time.sleep(0.5) 
 
             result_code = self.kiwoom_helper.ocx.CommRqData(rq_name, tr_code, sPrevNext, screen_no)
             
-            if result_code == 0: 
-                self.tr_timer.start(timeout_ms) 
-                self.tr_event_loop.exec_() 
+            if result_code == 0: # TR 요청 함수 호출 성공
+                self.tr_wait_timer.start(timeout_ms) # TR 응답 대기 타이머 시작
+                self.tr_wait_event_loop.exec_() # TR 응답이 오거나 타임아웃 될 때까지 대기
 
-                if self.tr_timer.isActive(): 
-                    self.tr_timer.stop()
+                # 이벤트 루프 종료 후 타이머가 아직 활성 상태라면 중지
+                if self.tr_wait_timer.isActive(): 
+                    self.tr_wait_timer.stop()
                 
+                # TR 데이터가 성공적으로 수신되었는지 확인
                 if self.tr_data is not None and not self.tr_data.get("error"):
+                    logger.debug(f"TR 요청 성공 및 데이터 수신: {rq_name}")
                     return self.tr_data 
                 elif self.tr_data and self.tr_data.get("error"):
-                    logger.warning(f"TR 요청 성공 후 데이터 처리 오류: {self.tr_data['error']}. 재시도 필요 시도.")
-                    if attempt == retry_attempts - 1:
+                    # 데이터 처리 중 오류가 발생했거나 타임아웃으로 인한 오류 데이터
+                    logger.warning(f"TR 요청 성공 후 응답 데이터 처리 오류: {self.tr_data['error']}. (재시도 중...)")
+                    if attempt == retry_attempts - 1: # 마지막 시도라면 오류 반환
                         return self.tr_data 
                     time.sleep(retry_delay_sec) 
-                    continue 
+                    continue # 재시도
                 else:
-                    logger.warning(f"TR 요청 성공 후 응답 데이터 없음 (타임아웃?). 재시도 필요 시도.")
+                    # 응답 데이터 자체가 None이거나 예상치 못한 상황 (재시도)
+                    logger.warning(f"TR 요청 성공했으나 응답 데이터 없음 (내부 오류 또는 타임아웃). (재시도 중...)")
                     if attempt == retry_attempts - 1:
-                        return {"error": f"TR 요청 응답 없음/타임아웃: {rq_name}"}
+                        return {"error": f"TR 요청 응답 없음/내부 타임아웃: {rq_name}"}
                     time.sleep(retry_delay_sec) 
-                    continue 
+                    continue # 재시도
 
-            else: 
+            else: # TR 요청 함수 호출 자체 실패 (CommRqData의 반환 코드)
                 error_msg = self._get_error_message(result_code)
-                logger.error(f"TR 요청 자체 실패: {rq_name} ({tr_code}) - 코드: {result_code} ({error_msg}). 재시도 중...")
-                if attempt == retry_attempts - 1:
+                logger.error(f"TR 요청 자체 실패: {rq_name} ({tr_code}) - 코드: {result_code} ({error_msg}). (재시도 중...)")
+                if attempt == retry_attempts - 1: # 마지막 시도라면 최종 오류 반환
                     return {"error": f"TR 요청 최종 실패: {result_code} ({error_msg})"}
-                time.sleep(retry_delay_sec) 
+                time.sleep(retry_delay_sec) # 실패 시 재시도 전 대기
         
         return {"error": "알 수 없는 TR 요청 실패 (모든 재시도 소진)"} 
 
-    def request_account_info(self, account_no, timeout_ms=30000):
+    def request_account_info(self, account_no, timeout_ms=30000, retry_attempts=3, retry_delay_sec=5): 
         """
-        계좌 정보를 요청하고 반환합니다.
-        TR 코드: opw00001 (계좌평가현황요청 - 주로 예수금 등의 단일 정보)
-        """
-        self.kiwoom_helper.ocx.SetInputValue("계좌번호", account_no)
-        return self._send_tr_request("opw00001_req", "opw00001", 0, "2000", timeout_ms, retry_attempts=5, retry_delay_sec=5) # 💡 retry_delay_sec 증가
-
-    def request_daily_account_holdings(self, account_no, password="", prev_next="0", timeout_ms=60000):
-        """
-        계좌 평가 잔고 내역 (보유 종목 리스트)를 요청합니다 (opw00018).
+        예수금 등 계좌 잔고 정보 요청 (opw00001)
         """
         self.kiwoom_helper.ocx.SetInputValue("계좌번호", account_no)
-        self.kiwoom_helper.ocx.SetInputValue("비밀번호", password) 
+        self.kiwoom_helper.ocx.SetInputValue("비밀번호", "") 
         self.kiwoom_helper.ocx.SetInputValue("비밀번호입력매체구분", "00") 
-        self.kiwoom_helper.ocx.SetInputValue("조회구분", "1") 
+        self.kiwoom_helper.ocx.SetInputValue("조회구분", "2") 
 
-        prev_next_int = 0 if prev_next == "0" else 2 
+        screen_no = self._generate_unique_screen_no() 
 
-        return self._send_tr_request(
-            f"opw00018_req_{account_no}", "opw00018", prev_next_int, "2004", timeout_ms, retry_attempts=5, retry_delay_sec=5 # 💡 retry_delay_sec 증가
-        )
+        # _send_tr_request 헬퍼 함수를 통해 TR 요청 및 재시도 관리
+        return self._send_tr_request("opw00001_req", "opw00001", 0, screen_no, timeout_ms, retry_attempts, retry_delay_sec)
 
-    def request_daily_ohlcv_data(self, stock_code, end_date, sPrevNext="0", timeout_ms=30000):
+    def request_daily_account_holdings(self, account_no, timeout_ms=30000, retry_attempts=3, retry_delay_sec=5):
         """
-        주식 일봉 차트 데이터를 요청합니다 (OPT10081).
+        계좌 평가 현황 및 보유 종목 정보를 요청합니다 (opw00018).
+        리스트 형태의 보유 종목 데이터를 반환합니다.
         """
-        self.kiwoom_helper.ocx.SetInputValue("종목코드", stock_code)
-        self.kiwoom_helper.ocx.SetInputValue("기준일자", end_date)
-        self.kiwoom_helper.ocx.SetInputValue("수정주가구분", "1") 
-        
-        prev_next_int = 0 if sPrevNext == "0" else 2
-        
-        return self._send_tr_request(
-            f"OPT10081_req_{stock_code}", "OPT10081", prev_next_int, "2001", timeout_ms 
-        )
+        self.kiwoom_helper.ocx.SetInputValue("계좌번호", account_no)
+        # opw00018의 입력값은 계좌번호만 필요합니다.
 
-    def request_five_minute_ohlcv_data(self, stock_code, tick_unit="5", sPrevNext="0", timeout_ms=30000):
-        """
-        주식 분봉/틱봉 차트 데이터를 요청합니다 (OPT10080).
-        """
-        self.kiwoom_helper.ocx.SetInputValue("종목코드", stock_code)
-        self.kiwoom_helper.ocx.SetInputValue("틱범위", tick_unit)
-        self.kiwoom_helper.ocx.SetInputValue("수정주가구분", "1") 
-        
-        prev_next_int = 0 if sPrevNext == "0" else 2
-        
-        return self._send_tr_request(
-            f"OPT10080_req_{stock_code}", "OPT10080", prev_next_int, "2002", timeout_ms 
-        )
+        screen_no = self._generate_unique_screen_no()
 
-    def request_stock_basic_info(self, stock_code, timeout_ms=30000):
-        """
-        주식 기본 정보 (시가총액 등)를 요청합니다 (OPT10001).
-        """
-        self.kiwoom_helper.ocx.SetInputValue("종목코드", stock_code)
+        tr_response = self._send_tr_request("opw00018_req", "opw00018", 0, screen_no, timeout_ms, retry_attempts, retry_delay_sec)
         
-        return self._send_tr_request(
-            f"OPT10001_req_{stock_code}", "OPT10001", 0, "2003", timeout_ms 
-        )
+        if tr_response and "holdings" in tr_response:
+            return tr_response["holdings"]
+        elif tr_response and "error" in tr_response:
+            logger.error(f"보유 종목 요청 실패 (TR 헬퍼): {tr_response['error']}")
+            return {"error": tr_response['error']} # 오류 발생 시 딕셔너리 형태로 반환
+        else:
+            logger.warning(f"TR 요청 성공했으나 opw00018 보유 종목 데이터 없음: {tr_response}")
+            return [] # 데이터 없으면 빈 리스트 반환
+
+
+    def _generate_unique_screen_no(self):
+        unique_part = str(int(time.time() * 100000))[-4:] 
+        screen_no = str(2000 + int(unique_part) % 7999) 
+        return screen_no
 
     def _get_error_message(self, err_code):
-        """Kiwoom API 에러 코드에 대한 설명을 반환합니다."""
         error_map = {
             0: "정상 처리",
             -10: "미접속",
@@ -274,6 +199,6 @@ class KiwoomTrRequest:
             -201: "입력값 오류",
             -202: "계좌정보 오류 (계좌번호 또는 비밀번호 관련 문제일 가능성 높음)", 
             -300: "알 수 없는 오류 (API 내부 오류, 요청 제한 등 복합적인 원인)", 
+            -999: "타임아웃 발생 (내부 정의)" 
         }
         return error_map.get(err_code, "알 수 없는 오류")
-
