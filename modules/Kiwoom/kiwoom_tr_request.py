@@ -2,28 +2,25 @@
 
 import logging
 import time
-from PyQt5.QtCore import QEventLoop, QTimer # 💡 QEventLoop와 QTimer 임포트
+from PyQt5.QtCore import QEventLoop, QTimer 
 
 from modules.common.utils import get_current_time_str 
 
 logger = logging.getLogger(__name__)
 
 class KiwoomTrRequest:
-    # __init__ 메서드는 kiwoom_helper와 pyqt_app_instance (QApplication)를 인자로 받습니다.
     def __init__(self, kiwoom_helper, pyqt_app_instance):
         self.kiwoom_helper = kiwoom_helper 
-        self.pyqt_app = pyqt_app_instance # 외부에서 생성된 QApplication 인스턴스를 받습니다.
+        self.pyqt_app = pyqt_app_instance 
         
-        # 💡 TR 응답 대기를 위한 전용 QEventLoop와 QTimer
         self.tr_event_loop = QEventLoop()
         self.tr_timer = QTimer()
-        self.tr_timer.setSingleShot(True) # 타이머 1회성 설정
-        self.tr_timer.timeout.connect(self._on_tr_timeout) # 타임아웃 시 콜백 연결
+        self.tr_timer.setSingleShot(True) 
+        self.tr_timer.timeout.connect(self._on_tr_timeout) 
         
         self.tr_data = None 
         self.rq_name = None 
 
-        # QAxWidget의 OnReceiveTrData 이벤트를 연결합니다.
         self.kiwoom_helper.ocx.OnReceiveTrData.connect(self._on_receive_tr_data)
         logger.info(f"{get_current_time_str()}: KiwoomTrRequest initialized.")
 
@@ -32,13 +29,11 @@ class KiwoomTrRequest:
         if self.tr_event_loop.isRunning():
             logger.error(f"[{get_current_time_str()}]: ❌ TR 요청 타임아웃 발생: {self.rq_name}")
             self.tr_data = {"error": f"TR 요청 타임아웃: {self.rq_name}"}
-            self.tr_event_loop.exit() # 이벤트 루프 강제 종료
+            self.tr_event_loop.exit() 
 
     def _on_receive_tr_data(self, screen_no, rq_name, tr_code, record_name, sPrevNext, data_len, err_code, msg1, msg2):
         """TR 데이터 수신 이벤트 핸들러"""
-        # 💡 현재 요청 중인 TR에 대한 응답인지 확인 (다른 TR 응답이 들어올 수 있으므로)
         if rq_name == self.rq_name: 
-            # 💡 TR 응답이 오면 타이머를 즉시 중지
             if self.tr_timer.isActive():
                 self.tr_timer.stop()
 
@@ -47,7 +42,7 @@ class KiwoomTrRequest:
                     deposit = self.kiwoom_helper.ocx.CommGetData(
                         tr_code, "", rq_name, 0, "예수금" 
                     )
-                    self.tr_data = {"예수금": int(deposit.strip())} # .strip() 추가
+                    self.tr_data = {"예수금": int(deposit.strip())} 
                     logger.info(f"TR 데이터 수신: {tr_code} - 예수금: {deposit.strip()}")
                 
                 elif tr_code == "OPT10081": # 주식 일봉 차트 요청
@@ -58,7 +53,7 @@ class KiwoomTrRequest:
                         open_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "시가").strip()))
                         high_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "고가").strip()))
                         low_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "저가").strip()))
-                        close_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "현재가").strip())) # '현재가'는 해당 일봉의 종가
+                        close_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "현재가").strip())) 
                         volume = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "거래량").strip()))
                         
                         daily_data_list.append({
@@ -76,7 +71,7 @@ class KiwoomTrRequest:
                         open_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "시가").strip()))
                         high_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "고가").strip()))
                         low_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "저가").strip()))
-                        close_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "현재가").strip())) # '현재가'는 해당 봉의 종가
+                        close_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "현재가").strip())) 
                         volume = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "거래량").strip()))
                         
                         five_min_data_list.append({
@@ -91,63 +86,89 @@ class KiwoomTrRequest:
                     market_cap = 0
                     if market_cap_str:
                         # 시가총액이 "1조 2,345억" 형식으로 올 수 있으므로 숫자만 추출
-                        # 키움 API는 시가총액을 실제 값으로 주기도 하므로, 문자열 처리 방식이 다를 수 있음
-                        # 여기서는 간단히 숫자로만 변환 시도. (실제 값은 원 단위로 가정)
-                        market_cap = int(market_cap_str.replace(",", "").replace(" ", "").replace("조", "000000000000").replace("억", "00000000")) # 💡 숫자만 추출 및 변환 개선
-                        # 실제 시가총액이 원 단위로 올 경우, config에서 억 단위로 나눌 때 사용
-                        
+                        market_cap = int(market_cap_str.replace(",", "").replace(" ", "").replace("조", "").replace("억", "") + "00000000") # '조'와 '억' 처리 방식 변경 (숫자만 남기고 뒤에 0 붙임)
+                        # 예: "1조 2000억" -> 12000000000000
+                        # 이 부분이 API 문서와 실제 반환값에 따라 다를 수 있으므로 테스트 필요
+                    
                     stock_basic_info = {
                         "종목코드": self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, 0, "종목코드").strip(),
                         "종목명": self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, 0, "종목명").strip(),
-                        "시가총액": market_cap, # 원 단위로 저장
+                        "시가총액": market_cap, 
                         "현재가": abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, 0, "현재가").strip())),
                     }
                     self.tr_data = stock_basic_info
                     logger.info(f"TR 데이터 수신: {tr_code} - {stock_basic_info.get('종목명')} 기본 정보")
 
+                # 💡 opw00018: 계좌평가잔고내역요청 (보유 종목 리스트)
+                elif tr_code == "opw00018":
+                    # 단일 데이터 (총평가금액 등)
+                    total_valuation_amount = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, 0, "총평가금액").strip())
+                    total_profit_loss_amount = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, 0, "총손익금액").strip())
+                    total_profit_loss_rate = float(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, 0, "총수익률(%)").strip())
+
+                    # 멀티 데이터 (보유 종목별 상세 정보)
+                    data_cnt = self.kiwoom_helper.ocx.GetRepeatCnt(tr_code, rq_name)
+                    holdings_list = []
+                    for i in range(data_cnt):
+                        stock_code = self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "종목번호").strip().replace('A', '') # 종목번호에 'A'가 붙어 나올 수 있음
+                        stock_name = self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "종목명").strip()
+                        quantity = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "보유수량").strip())
+                        purchase_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "매입가").strip()))
+                        current_price = abs(int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "현재가").strip()))
+                        profit_loss = int(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "평가손익").strip())
+                        profit_loss_rate = float(self.kiwoom_helper.ocx.CommGetData(tr_code, "", rq_name, i, "수익률(%)").strip())
+                        
+                        holdings_list.append({
+                            "종목코드": stock_code,
+                            "종목명": stock_name,
+                            "보유수량": quantity,
+                            "매입가": purchase_price,
+                            "현재가": current_price,
+                            "평가손익": profit_loss,
+                            "수익률(%)": profit_loss_rate
+                        })
+                    
+                    self.tr_data = {
+                        "total_info": {
+                            "총평가금액": total_valuation_amount,
+                            "총손익금액": total_profit_loss_amount,
+                            "총수익률(%)": total_profit_loss_rate
+                        },
+                        "data": holdings_list, # 보유 종목 리스트
+                        "sPrevNext": sPrevNext # 연속 조회 여부
+                    }
+                    logger.info(f"TR 데이터 수신: {tr_code} - {len(holdings_list)}개 보유 종목")
+
+
             except Exception as e:
                 logger.error(f"Error processing TR data for {tr_code}: {e}", exc_info=True)
                 self.tr_data = {"error": str(e)}
             finally:
-                # TR 응답을 받았으므로 이벤트 루프 종료 (블로킹 해제)
                 if self.tr_event_loop.isRunning():
                     self.tr_event_loop.exit()
         
     def _send_tr_request(self, rq_name, tr_code, sPrevNext, screen_no, timeout_ms=30000):
         """
         CommRqData를 호출하고 TR 응답을 기다리는 헬퍼 함수.
-        Args:
-            rq_name (str): TR 요청명 (식별자)
-            tr_code (str): TR 코드 (예: "opw00001", "OPT10081")
-            sPrevNext (int): 연속조회 여부 (0: 조회, 2: 연속)
-            screen_no (str): 화면 번호
-            timeout_ms (int): 응답 대기 타임아웃 (밀리초)
-        Returns:
-            dict: TR 응답 데이터 또는 오류 정보
         """
         self.rq_name = rq_name
-        self.tr_data = None # 이전 데이터 초기화
+        self.tr_data = None 
 
         logger.debug(f"TR 요청: rq_name='{rq_name}', tr_code='{tr_code}', sPrevNext={sPrevNext}, screen_no='{screen_no}'")
         
-        # 💡 CommRqData 호출 시 인자 순서 확인: (sRQName, sTrCode, nPrevNext, sScreenNo)
-        # Type error: 'str' to 'int' for argument 2 (sTrCode)
-        # This error is counter-intuitive if sTrCode is expected as string.
-        # Let's explicitly check types for debugging.
-        # logger.debug(f"CommRqData types: arg1({type(rq_name)}), arg2({type(tr_code)}), arg3({type(sPrevNext)}), arg4({type(screen_no)})")
+        # 💡 TR 요청 간 짧은 대기 (API 제한 방지)
+        time.sleep(0.2) # 0.2초 대기 (초당 5회 제한 고려)
 
         result = self.kiwoom_helper.ocx.CommRqData(rq_name, tr_code, sPrevNext, screen_no)
         
         if result == 0:
-            # TR 요청 성공 시, 데이터가 수신될 때까지 이벤트 루프 대기
-            self.tr_timer.start(timeout_ms) # 타임아웃 타이머 시작
-            self.tr_event_loop.exec_() # _on_receive_tr_data에서 exit() 호출됨
+            self.tr_timer.start(timeout_ms) 
+            self.tr_event_loop.exec_() 
 
-            if self.tr_timer.isActive(): # 응답이 타임아웃 전에 도착한 경우 타이머 중지
+            if self.tr_timer.isActive(): 
                 self.tr_timer.stop()
-            else: # 타이머가 만료된 경우 (타임아웃 발생)
-                # 이 경우는 _on_tr_timeout에서 이미 self.tr_data가 설정되었을 것임
-                return self.tr_data # 타임아웃 오류 메시지가 이미 포함됨
+            else: 
+                return self.tr_data 
 
             return self.tr_data
         else:
@@ -161,65 +182,60 @@ class KiwoomTrRequest:
         TR 코드: opw00001 (계좌평가현황요청 - 주로 예수금 등의 단일 정보)
         """
         self.kiwoom_helper.ocx.SetInputValue("계좌번호", account_no)
-        # 화면번호는 임의로 설정. 여러 TR에 같은 화면번호 사용 시 충돌 주의
         return self._send_tr_request("opw00001_req", "opw00001", 0, "2000", timeout_ms)
+
+    # 💡 request_daily_account_holdings 메서드 추가 (opw00018)
+    def request_daily_account_holdings(self, account_no, password="", prev_next="0", timeout_ms=60000):
+        """
+        계좌 평가 잔고 내역 (보유 종목 리스트)를 요청합니다 (opw00018).
+        """
+        self.kiwoom_helper.ocx.SetInputValue("계좌번호", account_no)
+        self.kiwoom_helper.ocx.SetInputValue("비밀번호", password) # 비밀번호 설정 시 필요
+        self.kiwoom_helper.ocx.SetInputValue("비밀번호입력매체구분", "00") # 00: 키보드 (보통 고정)
+        self.kiwoom_helper.ocx.SetInputValue("조회구분", "1") # 1: 총자산, 2: 개별종목
+
+        prev_next_int = 0 if prev_next == "0" else 2 # 0: 조회, 2: 연속조회
+
+        return self._send_tr_request(
+            f"opw00018_req_{account_no}", "opw00018", prev_next_int, "2004", timeout_ms # 화면번호 2004 사용
+        )
 
     def request_daily_ohlcv_data(self, stock_code, end_date, sPrevNext="0", timeout_ms=30000):
         """
         주식 일봉 차트 데이터를 요청합니다 (OPT10081).
-        Args:
-            stock_code (str): 종목코드
-            end_date (str): 기준일자 (YYYYMMDD)
-            sPrevNext (str): 연속조회 여부 ("0": 조회, "2": 연속)
-            timeout_ms (int): 타임아웃 (밀리초)
-        Returns:
-            dict: 일봉 데이터 또는 오류 정보
         """
         self.kiwoom_helper.ocx.SetInputValue("종목코드", stock_code)
         self.kiwoom_helper.ocx.SetInputValue("기준일자", end_date)
-        self.kiwoom_helper.ocx.SetInputValue("수정주가구분", "1") # 1: 수정주가 반영
+        self.kiwoom_helper.ocx.SetInputValue("수정주가구분", "1") 
         
-        # CommRqData의 sPrevNext는 int 타입이므로, "0" 또는 "2"를 int로 변환
         prev_next_int = 0 if sPrevNext == "0" else 2
         
         return self._send_tr_request(
-            f"OPT10081_req_{stock_code}", "OPT10081", prev_next_int, "2001", timeout_ms # 화면번호 고유하게 설정 (2001)
+            f"OPT10081_req_{stock_code}", "OPT10081", prev_next_int, "2001", timeout_ms 
         )
 
     def request_five_minute_ohlcv_data(self, stock_code, tick_unit="5", sPrevNext="0", timeout_ms=30000):
         """
         주식 분봉/틱봉 차트 데이터를 요청합니다 (OPT10080).
-        Args:
-            stock_code (str): 종목코드
-            tick_unit (str): 틱범위 (1, 3, 5, 10, 15, 30, 45, 60분 등)
-            sPrevNext (str): 연속조회 여부 ("0": 조회, "2": 연속)
-            timeout_ms (int): 타임아웃 (밀리초)
-        Returns:
-            dict: 분봉/틱봉 데이터 또는 오류 정보
         """
         self.kiwoom_helper.ocx.SetInputValue("종목코드", stock_code)
         self.kiwoom_helper.ocx.SetInputValue("틱범위", tick_unit)
-        self.kiwoom_helper.ocx.SetInputValue("수정주가구분", "1") # 1: 수정주가 반영
+        self.kiwoom_helper.ocx.SetInputValue("수정주가구분", "1") 
         
         prev_next_int = 0 if sPrevNext == "0" else 2
         
         return self._send_tr_request(
-            f"OPT10080_req_{stock_code}", "OPT10080", prev_next_int, "2002", timeout_ms # 화면번호 고유하게 설정 (2002)
+            f"OPT10080_req_{stock_code}", "OPT10080", prev_next_int, "2002", timeout_ms 
         )
 
     def request_stock_basic_info(self, stock_code, timeout_ms=30000):
         """
         주식 기본 정보 (시가총액 등)를 요청합니다 (OPT10001).
-        Args:
-            stock_code (str): 종목코드
-            timeout_ms (int): 타임아웃 (밀리초)
-        Returns:
-            dict: 기본 정보 데이터 또는 오류 정보
         """
         self.kiwoom_helper.ocx.SetInputValue("종목코드", stock_code)
         
         return self._send_tr_request(
-            f"OPT10001_req_{stock_code}", "OPT10001", 0, "2003", timeout_ms # 화면번호 고유하게 설정 (2003)
+            f"OPT10001_req_{stock_code}", "OPT10001", 0, "2003", timeout_ms 
         )
 
     def _get_error_message(self, err_code):

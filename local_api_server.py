@@ -28,7 +28,7 @@ from modules.Kiwoom.kiwoom_query_helper import KiwoomQueryHelper
 from modules.Kiwoom.kiwoom_tr_request import KiwoomTrRequest
 from modules.Kiwoom.monitor_positions import MonitorPositions
 from modules.Kiwoom.trade_manager import TradeManager
-from modules.strategies.buy_strategy import execute_buy_strategy # 💡 buy_strategy 임포트
+from modules.strategies.buy_strategy import execute_buy_strategy 
 from modules.strategies.monitor_positions_strategy import monitor_positions_strategy 
 from modules.common.config import get_env, API_SERVER_PORT
 from modules.common.utils import get_current_time_str
@@ -82,38 +82,33 @@ def initialize_kiwoom_api_in_background_thread():
     kiwoom_tr_request_thread = None
     monitor_positions_thread = None
     trade_manager_thread = None
-    pyqt_app = None # QApplication 인스턴스를 저장할 변수
-    kiwoom_ocx = None # QAxWidget 인스턴스를 저장할 변수
+    pyqt_app = None 
+    kiwoom_ocx = None 
 
     try:
         pythoncom.CoInitialize() 
         logger.info("✅ pythoncom CoInitialize 완료 (백그라운드 트레이딩 스레드)")
         
-        # 💡 QApplication을 QAxWidget 생성 전에 먼저 명시적으로 생성
         try:
-            pyqt_app = QApplication([]) # sys.argv 대신 빈 리스트를 전달하여 더욱 안전하게 생성
+            pyqt_app = QApplication([]) 
             logger.info("✅ 새로운 QApplication 인스턴스 생성 (백그라운드 트레이딩 스레드).")
         except Exception as qapp_e:
             logger.critical(f"❌ QApplication 생성 실패 (백그라운드 트레이딩 스레드): {qapp_e}")
             send_telegram_message(f"❌ QApplication 생성 실패: {qapp_e}")
-            return False, None, None, None, None, None # pyqt_app도 None으로 반환
+            return False, None, None, None, None, None 
 
-        # 💡 QApplication 생성 후 바로 이어서 QAxWidget을 생성합니다.
         try:
             kiwoom_ocx = QAxWidget("KHOPENAPI.KHOpenAPICtrl.1")
             logger.info("✅ QAxWidget 인스턴스 생성 완료.")
         except Exception as ocx_e:
             logger.critical(f"❌ QAxWidget 인스턴스 생성 실패 (백그라운드 트레이딩 스레드): {ocx_e}")
             send_telegram_message(f"❌ QAxWidget 생성 실패: {ocx_e}")
-            # QAxWidget 생성 실패 시 QApplication도 종료
             if pyqt_app:
                 pyqt_app.quit()
-            return False, None, None, None, None, None # pyqt_app도 None으로 반환
+            return False, None, None, None, None, None 
 
-        # KiwoomQueryHelper가 QAxWidget 인스턴스와 QApplication 인스턴스를 인자로 받도록 수정
         kiwoom_helper_thread = KiwoomQueryHelper(kiwoom_ocx, pyqt_app) 
 
-        # 💡 connect_kiwoom 호출 시 타임아웃 인자 전달 (기본 30초에서 60초로 늘림)
         if not kiwoom_helper_thread.connect_kiwoom(timeout_ms=60000): 
             logger.critical("❌ Kiwoom API 연결 실패 (백그라운드 트레이딩 스레드)")
             send_telegram_message("❌ Kiwoom API 연결 실패. 자동 매매 중단됨.")
@@ -127,7 +122,6 @@ def initialize_kiwoom_api_in_background_thread():
                 logger.warning(f"CoUninitialize 중 오류 발생: {e_uninit}")
             return False, None, None, None, None, None
 
-        # .env 파일에서 계좌번호 로드 시도
         account_number = get_env("ACCOUNT_NUMBERS", "").split(',')[0].strip()
         if not account_number:
             account_number_from_api = kiwoom_helper_thread.get_login_info("ACCNO")
@@ -146,26 +140,22 @@ def initialize_kiwoom_api_in_background_thread():
                 logger.warning(f"CoUninitialize 중 오류 발생: {e_uninit}")
             return False, None, None, None, None, None
 
-        # KiwoomTrRequest에도 pyqt_app을 전달하여 동일한 QApplication 인스턴스 사용
         kiwoom_tr_request_thread = KiwoomTrRequest(kiwoom_helper_thread, pyqt_app) 
         
         logger.info(f"💡 Kiwoom API 초기화에 사용될 계좌번호: '{account_number}'")
 
-        # MonitorPositions와 TradeManager는 서로 의존하므로 순환 참조 해결을 위해 초기화 순서 조정
-        # MonitorPositions에 일단 TradeManager 대신 None을 전달하고, 나중에 set_trade_manager 메서드를 통해 주입
         monitor_positions_thread = MonitorPositions(kiwoom_helper_thread, kiwoom_tr_request_thread, None, account_number) 
         trade_manager_thread = TradeManager(kiwoom_helper_thread, kiwoom_tr_request_thread, monitor_positions_thread, account_number)
-        monitor_positions_thread.set_trade_manager(trade_manager_thread) # MonitorPositions에 TradeManager 인스턴스 주입
+        monitor_positions_thread.set_trade_manager(trade_manager_thread) 
 
         logger.info(f"✅ Kiwoom API 연결 완료 (백그라운드 트레이딩 스레드) - 계좌번호: {account_number}")
         
-        # Kiwoom 초기화 성공 후, 공유 상태 업데이트
         with shared_state_lock:
             shared_kiwoom_state["account_number"] = account_number
             account_info = kiwoom_tr_request_thread.request_account_info(account_number)
             shared_kiwoom_state["balance"] = account_info.get("예수금", 0)
             
-            # API에서 보유 종목 조회 및 로컬 포지션 동기화
+            # 💡 request_daily_account_holdings 호출
             api_holdings_data = kiwoom_tr_request_thread.request_daily_account_holdings(account_number)
             if api_holdings_data and not api_holdings_data.get("error"):
                 monitor_positions_thread.sync_local_positions(api_holdings_data['data'])
@@ -175,7 +165,7 @@ def initialize_kiwoom_api_in_background_thread():
             else:
                 error_msg = api_holdings_data.get("error", "알 수 없는 보유 종목 조회 오류") if api_holdings_data else "보유 종목 조회 결과 없음"
                 logger.warning(f"⚠️ 초기 보유 종목 조회 실패: {error_msg}. 포지션이 없거나 API 응답 오류.")
-                shared_kiwoom_state["positions"] = {} # 초기화
+                shared_kiwoom_state["positions"] = {} 
                 send_telegram_message(f"⚠️ 자동 매매 시작: 보유 종목 초기 조회 실패. {error_msg}")
 
             shared_kiwoom_state["last_update_time"] = get_current_time_str()
@@ -183,7 +173,6 @@ def initialize_kiwoom_api_in_background_thread():
         global app_initialized
         app_initialized = True 
         
-        # 💡 pyqt_app도 함께 반환하도록 수정
         return True, kiwoom_helper_thread, kiwoom_tr_request_thread, monitor_positions_thread, trade_manager_thread, pyqt_app
 
     except Exception as e:
@@ -191,13 +180,12 @@ def initialize_kiwoom_api_in_background_thread():
         send_telegram_message(f"❌ 자동 매매 스레드 COM 초기화 실패: {e}")
         if kiwoom_helper_thread:
             kiwoom_helper_thread.disconnect_kiwoom()
-        if pyqt_app: # 오류 발생 시 pyqt_app이 생성되어 있다면 종료
+        if pyqt_app:
             pyqt_app.quit()
         try:
             pythoncom.CoUninitialize()
         except Exception as e_uninit:
             logger.warning(f"CoUninitialize 중 오류 발생: {e_uninit}")
-        # 오류 발생 시에도 pyqt_app을 None으로 반환
         return False, None, None, None, None, None
 
 
@@ -205,16 +193,15 @@ def initialize_kiwoom_api_in_background_thread():
 def background_trading_loop():
     logger.info("🔍 백그라운드 트레이딩 스레드 시작 중...")
     
-    # 💡 initialize_kiwoom_api_in_background_thread의 반환 값 6개에 맞춰 언패킹
     success, kiwoom_helper_thread, kiwoom_tr_request_thread, monitor_positions_thread, trade_manager_thread, pyqt_app = \
         initialize_kiwoom_api_in_background_thread()
     
     if not success:
         logger.critical("❌ 백그라운드 트레이딩 스레드 초기화 실패. 스레드를 종료합니다.")
-        if pyqt_app: # 실패 시 QApplication 정리
+        if pyqt_app: 
             pyqt_app.quit()
         try:
-            pythoncom.CoUninitialize() # COM 정리
+            pythoncom.CoUninitialize()
         except Exception as e_uninit:
             logger.warning(f"CoUninitialize 중 오류 발생: {e_uninit}")
         return 
@@ -272,7 +259,6 @@ def background_trading_loop():
     try: 
         while True:
             now = datetime.now()
-            # 💡 매매 시간 (09:05 ~ 15:00)에만 매수 전략 실행
             if time(9, 5) <= now.time() < time(15, 0): 
                 logger.info(f"[{get_current_time_str()}] 매수 전략 실행: 종목 검색 및 매수 결정.")
                 execute_buy_strategy(kiwoom_helper_thread, kiwoom_tr_request_thread, trade_manager_thread, monitor_positions_thread)
@@ -283,14 +269,10 @@ def background_trading_loop():
             elif now.time() >= time(15, 30) or now.time() < time(9, 0):
                 logger.info(f"[{get_current_time_str()}] 현재 매매 시간 아님. 대기 중...")
 
-            # --- 포지션 모니터링 및 매도 전략 실행 (지속적으로 실행) ---
             monitor_positions_strategy(monitor_positions_thread, trade_manager_thread)
 
-            # Flask의 /status 엔드포인트를 위해 공유 상태 업데이트
             with shared_state_lock:
                 shared_kiwoom_state["positions"] = monitor_positions_thread.get_all_positions() 
-                # 계좌 잔고는 TR 요청이 필요하므로, 자주 호출하면 API 제한에 걸릴 수 있습니다.
-                # 여기서는 30초마다 업데이트한다고 가정하지만, 실제 환경에서는 빈도 조절 필요.
                 account_info = kiwoom_tr_request_thread.request_account_info(shared_kiwoom_state["account_number"])
                 shared_kiwoom_state["balance"] = account_info.get("예수금", 0)
                 shared_kiwoom_state["last_update_time"] = get_current_time_str()
@@ -302,11 +284,11 @@ def background_trading_loop():
         logger.exception(msg)
         send_telegram_message(msg)
         time_module.sleep(60)
-    finally: # 💡 메인 루프 종료 시 CoUninitialize 호출 및 QApplication 종료
+    finally: 
         if pyqt_app:
-            pyqt_app.quit() # QApplication 종료
+            pyqt_app.quit() 
         try:
-            pythoncom.CoUninitialize() # COM 정리
+            pythoncom.CoUninitialize()
         except Exception as e_uninit:
             logger.warning(f"CoUninitialize 중 오류 발생 (메인 루프 종료 시): {e_uninit}")
 
@@ -335,15 +317,11 @@ def status():
 
 # --- Flask 서버 실행 ---
 if __name__ == '__main__':
-    # Kiwoom API 및 트레이딩 로직을 담당할 백그라운드 스레드 시작
-    # daemon=True 설정으로 메인 스레드 종료 시 함께 종료되도록 함
     trading_thread = threading.Thread(target=background_trading_loop, daemon=True)
     trading_thread.start()
     
     logger.info("📡 Flask 서버 시작 준비 중...")
     
-    # 백그라운드 스레드가 Kiwoom API 초기화를 완료할 때까지 기다림
-    # app_initialized 플래그가 백그라운드 스레드에서 설정될 때까지 대기
     init_timeout = 120 
     start_time = time_module.time()
     while not app_initialized and (time_module.time() - start_time) < init_timeout:
