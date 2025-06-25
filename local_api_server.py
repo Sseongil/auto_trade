@@ -102,8 +102,8 @@ def initialize_kiwoom_api_in_background_thread():
 
         kiwoom_helper_thread = KiwoomQueryHelper(kiwoom_ocx, pyqt_app) 
 
-        # connect_kiwoom 호출 시 타임아웃 인자를 명시적으로 전달 (기본 30초, 필요 시 조절)
-        if not kiwoom_helper_thread.connect_kiwoom(timeout_ms=60000): # 예를 들어, 60초로 늘림
+        # connect_kiwoom 호출 시 타임아웃 인자를 명시적으로 전달 (사용자 요청에 따라 10초로)
+        if not kiwoom_helper_thread.connect_kiwoom(timeout_ms=10000): # 💡 10초로 조정
             logger.critical("❌ Kiwoom API 연결 실패 (백그라운드 트레이딩 스레드)")
             send_telegram_message("❌ Kiwoom API 연결 실패. 자동 매매 중단됨.")
             if kiwoom_helper_thread: 
@@ -115,7 +115,7 @@ def initialize_kiwoom_api_in_background_thread():
             return False, None, None, None, None
 
         account_number = get_env("ACCOUNT_NUMBERS", "").split(',')[0].strip()
-        account_password = get_env("ACCOUNT_PASSWORD", "") # 💡 .env에서 계좌 비밀번호 로드
+        account_password = get_env("ACCOUNT_PASSWORD", "") # .env에서 계좌 비밀번호 로드
         
         if not account_number:
             account_number_from_api = kiwoom_helper_thread.get_login_info("ACCNO")
@@ -132,7 +132,7 @@ def initialize_kiwoom_api_in_background_thread():
                 logger.warning(f"CoUninitialize 중 오류 발생: {e_uninit}")
             return False, None, None, None, None
 
-        # 💡 KiwoomTrRequest에 계좌 비밀번호 인자로 전달
+        # KiwoomTrRequest에 계좌 비밀번호 인자로 전달
         kiwoom_tr_request_thread = KiwoomTrRequest(kiwoom_helper_thread, pyqt_app, account_password) 
         
         logger.info(f"💡 Kiwoom API 초기화에 사용될 계좌번호: '{account_number}'")
@@ -146,15 +146,17 @@ def initialize_kiwoom_api_in_background_thread():
         with shared_state_lock:
             shared_kiwoom_state["account_number"] = account_number
             
-            account_info = kiwoom_tr_request_thread.request_account_info(account_number, timeout_ms=30000) 
+            # 계좌 정보 초기 조회 및 오류 처리 강화
+            account_info = kiwoom_tr_request_thread.request_account_info(account_number, timeout_ms=30000) # TR 요청에도 타임아웃 추가
             
-            if account_info and not account_info.get("error"): 
+            if account_info and not account_info.get("error"): # 계좌 정보가 유효하고 오류가 없을 경우
                 shared_kiwoom_state["balance"] = account_info.get("예수금", 0)
                 logger.info(f"💰 초기 계좌 잔고: {shared_kiwoom_state['balance']} KRW")
             else:
                 error_msg = account_info.get("error", "알 수 없는 계좌 정보 조회 오류") if account_info else "계좌 정보 조회 결과 없음"
                 logger.critical(f"❌ 계좌 정보 초기 조회 실패: {error_msg}")
                 send_telegram_message(f"❌ 자동 매매 시작 실패: 계좌 정보 조회 실패. {error_msg}")
+                # 계좌 정보 조회 실패 시 초기화 실패로 간주하고 종료
                 return False, None, None, None, None 
 
             shared_kiwoom_state["last_update_time"] = get_current_time_str()
@@ -249,13 +251,20 @@ def background_trading_loop():
             elif now.time() >= time(15, 30) or now.time() < time(9, 0):
                 logger.info(f"[{get_current_time_str()}] 현재 매매 시간 아님. 대기 중...")
 
-            monitor_positions_thread.monitor_positions_strategy()
+            # monitor_positions_strategy 함수를 독립 함수로 호출
+            monitor_positions_strategy(monitor_positions_thread, trade_manager_thread)
 
             with shared_state_lock:
+                # monitor_positions_strategy 내부에서 최신 API 보유 현황을 가져와 동기화하므로,
+                # 여기서는 단순히 get_all_positions() 호출로 최신화된 로컬 포지션 가져옴.
                 shared_kiwoom_state["positions"] = monitor_positions_thread.get_all_positions() 
+                
+                # 잔고는 매 거래 또는 일정 주기로만 업데이트하는 것이 API 제한에 유리 (지금은 초기화 시점에만 업데이트)
+                # 만약 주기적 업데이트가 필요하다면 여기에 request_account_info 호출 로직 추가
+                
                 shared_kiwoom_state["last_update_time"] = get_current_time_str()
 
-            time_module.sleep(30) 
+            time_module.sleep(30) # 매 30초마다 모든 작업(매매 전략, 모니터링) 주기
 
         except Exception as e:
             msg = f"🔥 백그라운드 트레이딩 루프 오류 발생: {e}"
@@ -307,4 +316,3 @@ if __name__ == '__main__':
         
     logger.info(f"🚀 Flask 서버 실행: http://0.0.0.0:{API_SERVER_PORT}")
     app.run(host="0.0.0.0", port=int(API_SERVER_PORT), debug=True, use_reloader=False)
-
