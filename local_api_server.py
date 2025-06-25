@@ -9,6 +9,7 @@ from datetime import datetime, time
 import threading
 import time as time_module
 
+# 💡 QApplication과 QAxWidget 임포트 (이 파일에서 직접 생성 및 주입)
 from PyQt5.QtWidgets import QApplication 
 from PyQt5.QAxContainer import QAxWidget 
 
@@ -21,6 +22,7 @@ if modules_path not in sys.path:
     sys.path.insert(0, modules_path) 
 
 # --- 모듈 임포트 ---
+# KiwoomQueryHelper, KiwoomTrRequest는 이제 QAxWidget 및 QApplication 인스턴스를 인자로 받습니다.
 from modules.Kiwoom.kiwoom_query_helper import KiwoomQueryHelper
 from modules.Kiwoom.kiwoom_tr_request import KiwoomTrRequest
 from modules.Kiwoom.monitor_positions import MonitorPositions
@@ -119,6 +121,10 @@ def initialize_kiwoom_api_in_background_thread():
                 logger.warning(f"CoUninitialize 중 오류 발생: {e_uninit}")
             return False, None, None, None, None, None
 
+        # 💡 API 연결 성공 후 초기 TR 요청 전 추가 지연 시간
+        logger.info("✅ Kiwoom API 연결 성공. 초기 TR 요청 전 10초 대기 중...")
+        time_module.sleep(10)
+
         account_number = get_env("ACCOUNT_NUMBERS", "").split(',')[0].strip()
         if not account_number:
             account_number_from_api = kiwoom_helper_thread.get_login_info("ACCNO")
@@ -150,7 +156,6 @@ def initialize_kiwoom_api_in_background_thread():
         with shared_state_lock:
             shared_kiwoom_state["account_number"] = account_number
             
-            # 💡 계좌 예수금 정보 요청 (재시도 로직 적용)
             account_info = kiwoom_tr_request_thread.request_account_info(account_number)
             if account_info and not account_info.get("error"):
                 shared_kiwoom_state["balance"] = account_info.get("예수금", 0)
@@ -169,14 +174,11 @@ def initialize_kiwoom_api_in_background_thread():
                 return False, None, None, None, None, None
 
 
-            # 💡 보유 종목 정보 요청 (재시도 로직 적용)
             api_holdings_data_response = kiwoom_tr_request_thread.request_daily_account_holdings(account_number)
             
-            # TR 응답이 오류를 포함할 경우, 'data' 키가 없을 수 있으므로 안전하게 접근
             if api_holdings_data_response and not api_holdings_data_response.get("error"):
-                # opw00018 TR 응답의 'data' 키 아래에 실제 보유 종목 리스트가 있습니다.
                 holdings_data_list = api_holdings_data_response.get('data', [])
-                monitor_positions_thread.sync_local_positions(holdings_data_list) # 리스트만 전달
+                monitor_positions_thread.sync_local_positions(holdings_data_list) 
                 monitor_positions_thread.register_all_positions_for_real_time_data()
                 shared_kiwoom_state["positions"] = monitor_positions_thread.get_all_positions() 
                 logger.info(f"초기 보유 종목 로드 및 실시간 등록 완료. 총 {len(shared_kiwoom_state['positions'])} 종목.")
@@ -285,7 +287,7 @@ def background_trading_loop():
             elif now.time() >= time(15, 20) and now.time() < time(15, 30):
                 logger.info(f"[{get_current_time_str()}] 장 마감 동시호가 시간. 추가 매매/매도 불가.")
             elif now.time() >= time(15, 30) or now.time() < time(9, 0):
-                logger.info(f"[{current_time_str}] 현재 매매 시간 아님. 대기 중...")
+                logger.info(f"[{get_current_time_str()}] 현재 매매 시간 아님. 대기 중...")
 
             monitor_positions_strategy(monitor_positions_thread, trade_manager_thread)
 
