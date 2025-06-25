@@ -61,8 +61,16 @@ class MonitorPositions:
         """
         API에서 조회한 보유 종목 데이터와 로컬 포지션 데이터를 동기화합니다.
         주로 시스템 시작 시 호출되어 실제 보유 종목을 로컬에 반영합니다.
+        Args:
+            api_holdings_data (list of dict): API에서 조회한 보유 종목 데이터 (예: [{'종목코드': '005930', '보유수량': 10, ...}])
+                                              또는 오류 메시지가 포함된 dict일 수 있습니다.
         """
         with self.position_lock:
+            # 💡 api_holdings_data가 유효한 리스트인지 먼저 확인
+            if not isinstance(api_holdings_data, list):
+                logger.warning(f"Invalid api_holdings_data received for sync_local_positions: {api_holdings_data}. Skipping sync.")
+                return # 유효하지 않은 데이터이므로 동기화 건너뜀
+
             old_positions = self.positions.copy()
             self.positions = {} 
 
@@ -72,7 +80,7 @@ class MonitorPositions:
                 purchase_price = float(item.get("매입가", 0)) 
 
                 if stock_code and quantity > 0:
-                    stock_name = item.get("종목명", self.kiwoom_helper.get_stock_name(stock_code)) # API 응답에 종목명이 있으면 사용, 없으면 조회
+                    stock_name = item.get("종목명", self.kiwoom_helper.get_stock_name(stock_code)) 
                     
                     existing_pos_data = old_positions.get(stock_code, {})
                     
@@ -179,3 +187,4 @@ class MonitorPositions:
                 logger.info(f"Position for {stock_code} removed from monitoring and real-time. Remaining positions: {len(self.positions)}")
             else:
                 logger.warning(f"Attempted to remove non-existent position: {stock_code}. No action taken.")
+
