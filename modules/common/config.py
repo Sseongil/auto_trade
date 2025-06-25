@@ -19,7 +19,7 @@ DATA_DIR = os.path.join(BASE_DIR, 'data') # data 폴더 경로
 # 데이터 폴더가 없으면 생성
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# � 포지션 파일 경로 추가
+# 💡 포지션 파일 경로 추가
 POSITIONS_FILE_PATH = os.path.join(DATA_DIR, 'positions.json')
 TRADE_LOG_DB_PATH = os.path.join(DATA_DIR, 'trade_log.db')
 
