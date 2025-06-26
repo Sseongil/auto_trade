@@ -138,23 +138,21 @@ class KiwoomTrRequest:
         
         return {"error": "알 수 없는 TR 요청 실패 (모든 재시도 소진)"} 
 
-    def request_account_info(self, account_no, timeout_ms=30000, retry_attempts=5, retry_delay_sec=5): 
-        """
-        예수금 등 계좌 잔고 정보 요청 (opw00001)
-        """
-        # KOA StudioSA 예제에 맞춰 모든 입력값을 명시적으로 설정
-        self.kiwoom_helper.ocx.SetInputValue("계좌번호", account_no)
-        # 보안을 위해 비밀번호의 일부만 로그에 출력 (실제 Kiwoom API에는 빈 문자열 전달)
-        masked_password = self.account_password[:2] + '*' * (len(self.account_password) - 4) + self.account_password[-2:] if len(self.account_password) > 4 else '*' * len(self.account_password)
-        logger.info(f"SetInputValue: 계좌번호='{account_no}', 비밀번호='{masked_password}' (실제 API 전달 값: 빈 문자열), 비밀번호입력매체구분='00', 조회구분='2'") 
-        self.kiwoom_helper.ocx.SetInputValue("비밀번호", "") # 💡 모의투자 계좌의 경우 비밀번호를 공란으로 넘겨야 정상 작동
-        self.kiwoom_helper.ocx.SetInputValue("비밀번호입력매체구분", "00") # 00 (공백불가)
-        self.kiwoom_helper.ocx.SetInputValue("조회구분", "2") # 2:일반조회
+def request_account_info(self, account_no, timeout_ms=30000, retry_attempts=5, retry_delay_sec=5):
+    self.kiwoom_helper.ocx.SetInputValue("계좌번호", account_no)
+    
+    masked_password = self.account_password[:2] + '*' * (len(self.account_password) - 4) + self.account_password[-2:] if len(self.account_password) > 4 else '*' * len(self.account_password)
+    logger.info(f"SetInputValue: 계좌번호='{account_no}', 비밀번호='{masked_password}'")
 
-        screen_no = self._generate_unique_screen_no() 
+    # ✅ 여기를 수정: 실제 비밀번호를 전달
+    self.kiwoom_helper.ocx.SetInputValue("비밀번호", self.account_password)
 
-        # _send_tr_request 헬퍼 함수를 통해 TR 요청 및 재시도 관리
-        return self._send_tr_request("opw00001_req", "opw00001", 0, screen_no, timeout_ms, retry_attempts, retry_delay_sec)
+    self.kiwoom_helper.ocx.SetInputValue("비밀번호입력매체구분", "00")
+    self.kiwoom_helper.ocx.SetInputValue("조회구분", "2")
+
+    screen_no = self._generate_unique_screen_no()
+
+    return self._send_tr_request("opw00001_req", "opw00001", 0, screen_no, timeout_ms, retry_attempts, retry_delay_sec)
 
     def request_daily_account_holdings(self, account_no, timeout_ms=30000, retry_attempts=5, retry_delay_sec=5):
         """
