@@ -139,21 +139,35 @@ class KiwoomTrRequest:
         return {"error": "알 수 없는 TR 요청 실패 (모든 재시도 소진)"} 
 
 def request_account_info(self, account_no, timeout_ms=30000, retry_attempts=5, retry_delay_sec=5):
-    self.kiwoom_helper.ocx.SetInputValue("계좌번호", account_no)
-    
-    masked_password = self.account_password[:2] + '*' * (len(self.account_password) - 4) + self.account_password[-2:] if len(self.account_password) > 4 else '*' * len(self.account_password)
-    logger.info(f"SetInputValue: 계좌번호='{account_no}', 비밀번호='{masked_password}'")
+    """예수금/잔고 등 계좌 기본 정보 요청"""
+    try:
+        self.kiwoom_helper.ocx.SetInputValue("계좌번호", account_no)
+        
+        # 비밀번호 전달 (self.account_password는 클래스 초기화 시 받은 값)
+        masked_password = self.account_password[:2] + '*' * (len(self.account_password) - 4) + self.account_password[-2:] if len(self.account_password) > 4 else '*' * len(self.account_password)
+        logger.info(f"SetInputValue: 계좌번호='{account_no}', 비밀번호='{masked_password}'")
 
-    # ✅ 여기를 수정: 실제 비밀번호를 전달
-    self.kiwoom_helper.ocx.SetInputValue("비밀번호", self.account_password)
+        self.kiwoom_helper.ocx.SetInputValue("비밀번호", self.account_password)
+        self.kiwoom_helper.ocx.SetInputValue("비밀번호입력매체구분", "00")
+        self.kiwoom_helper.ocx.SetInputValue("조회구분", "2")
 
-    self.kiwoom_helper.ocx.SetInputValue("비밀번호입력매체구분", "00")
-    self.kiwoom_helper.ocx.SetInputValue("조회구분", "2")
+        screen_no = self._generate_unique_screen_no()
+        
+        result = self._send_tr_request(
+            rq_name="opw00001_req",
+            tr_code="opw00001",
+            prev_next=0,
+            screen_no=screen_no,
+            timeout_ms=timeout_ms,
+            retry_attempts=retry_attempts,
+            retry_delay_sec=retry_delay_sec
+        )
 
-    screen_no = self._generate_unique_screen_no()
+        return result
 
-    return self._send_tr_request("opw00001_req", "opw00001", 0, screen_no, timeout_ms, retry_attempts, retry_delay_sec)
-
+    except Exception as e:
+        logger.exception(f"❌ request_account_info() 중 오류 발생: {e}")
+        return {"error": str(e)}
     def request_daily_account_holdings(self, account_no, timeout_ms=30000, retry_attempts=5, retry_delay_sec=5):
         """
         계좌 평가 현황 및 보유 종목 정보를 요청합니다 (opw00018).

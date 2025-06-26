@@ -51,7 +51,7 @@ shared_state_lock = threading.Lock()
 # --- API 키 보안 인증 ---
 LOCAL_API_KEY = get_env("LOCAL_API_KEY")
 if not LOCAL_API_KEY:
-    logger.critical("\u274c LOCAL_API_KEY 환경 변수 미설정 - 서버 종료")
+    logger.critical("❌ LOCAL_API_KEY 환경 변수 미설정 - 서버 종료")
     sys.exit(1)
 
 def api_key_required(f):
@@ -62,7 +62,7 @@ def api_key_required(f):
         if api_key and api_key == LOCAL_API_KEY:
             return f(*args, **kwargs)
         else:
-            logger.warning(f"\u274c 인증 실패 - 유효하지 않은 API 키: {request.remote_addr}")
+            logger.warning(f"❌ 인증 실패 - 유효하지 않은 API 키: {request.remote_addr}")
             return jsonify({"status": "error", "message": "Unauthorized"}), 401
     return wrapper
 
@@ -78,15 +78,15 @@ def initialize_kiwoom_api_in_background_thread():
     try:
         import pythoncom
         pythoncom.CoInitialize() 
-        logger.info("\u2705 pythoncom CoInitialize 완료 (백그라운드 트레이딩 스레드)")
+        logger.info("✅ pythoncom CoInitialize 완료 (백그라운드 트레이딩 스레드)")
 
         pyqt_app = QApplication([])
         kiwoom_ocx = QAxWidget("KHOPENAPI.KHOpenAPICtrl.1")
         kiwoom_helper_thread = KiwoomQueryHelper(kiwoom_ocx, pyqt_app)
 
         if not kiwoom_helper_thread.connect_kiwoom(timeout_ms=10000):
-            logger.critical("\u274c Kiwoom API 연결 실패")
-            send_telegram_message("\u274c Kiwoom API 연결 실패. 자동 매매 중단됨.")
+            logger.critical("❌ Kiwoom API 연결 실패")
+            send_telegram_message("❌ Kiwoom API 연결 실패. 자동 매매 중단됨.")
             return False, None, None, None, None
 
         account_number = get_env("ACCOUNT_NUMBERS", "").split(',')[0].strip()
@@ -99,16 +99,24 @@ def initialize_kiwoom_api_in_background_thread():
 
         kiwoom_tr_request_thread = KiwoomTrRequest(kiwoom_helper_thread, pyqt_app, account_password)
 
-        # --- 요청 사이 sleep 추가로 -300 오류 방지 ---
-        time_module.sleep(1.0)
+        time_module.sleep(2.0)  # 로그인 직후 대기 추가
 
-        account_info = kiwoom_tr_request_thread.request_account_info(account_number, timeout_ms=30000)
+        # ✅ request_account_info 메서드를 내부 정의로 대체
+        def request_account_info(account_no, timeout_ms=30000):
+            kiwoom_helper_thread.ocx.SetInputValue("계좌번호", account_no)
+            kiwoom_helper_thread.ocx.SetInputValue("비밀번호", account_password)
+            kiwoom_helper_thread.ocx.SetInputValue("비밀번호입력매체구분", "00")
+            kiwoom_helper_thread.ocx.SetInputValue("조회구분", "2")
+            screen_no = "3441"
+            return kiwoom_helper_thread.send_tr_request("opw00001_req", "opw00001", 0, screen_no, timeout_ms)
+
+        account_info = request_account_info(account_number, timeout_ms=30000)
 
         if account_info and not account_info.get("error"):
             balance = account_info.get("예수금", 0)
         else:
-            logger.critical("\u274c 계좌 정보 초기 조회 실패")
-            send_telegram_message("\u274c 계좌 정보 초기 조회 실패")
+            logger.critical("❌ 계좌 정보 초기 조회 실패")
+            send_telegram_message("❌ 계좌 정보 초기 조회 실패")
             return False, None, None, None, None
 
         monitor_positions_thread = MonitorPositions(kiwoom_helper_thread, kiwoom_tr_request_thread, None, account_number)
@@ -124,22 +132,22 @@ def initialize_kiwoom_api_in_background_thread():
         global app_initialized
         app_initialized = True 
 
-        logger.info(f"\u2705 Kiwoom API 초기화 완료 - 계좌번호: {account_number}")
+        logger.info(f"✅ Kiwoom API 초기화 완료 - 계좌번호: {account_number}")
         return True, kiwoom_helper_thread, kiwoom_tr_request_thread, monitor_positions_thread, trade_manager_thread
 
     except Exception as e:
-        logger.critical(f"\u274c Kiwoom API 초기화 중 예외 발생: {e}", exc_info=True)
-        send_telegram_message(f"\u274c Kiwoom 초기화 실패: {e}")
+        logger.critical(f"❌ Kiwoom API 초기화 중 예외 발생: {e}", exc_info=True)
+        send_telegram_message(f"❌ Kiwoom 초기화 실패: {e}")
         return False, None, None, None, None
 
 
 # --- 백그라운드 매매 루프 ---
 def background_trading_loop():
-    logger.info("\ud83d\udd0d 백그라운드 트레이딩 스레드 시작 중...")
+    logger.info("🔍 백그라운드 트레이딩 스레드 시작 중...")
     success, kiwoom_helper_thread, kiwoom_tr_request_thread, monitor_positions_thread, trade_manager_thread = \
         initialize_kiwoom_api_in_background_thread()
     if not success:
-        logger.critical("\u274c 초기화 실패")
+        logger.critical("❌ 초기화 실패")
         return 
 
     while True:
@@ -153,8 +161,8 @@ def background_trading_loop():
                 shared_kiwoom_state["last_update_time"] = get_current_time_str()
             time_module.sleep(30)
         except Exception as e:
-            logger.exception(f"\ud83d\udd25 루프 오류: {e}")
-            send_telegram_message(f"\ud83d\udd25 루프 오류: {e}")
+            logger.exception(f"🔥 루프 오류: {e}")
+            send_telegram_message(f"🔥 루프 오류: {e}")
             time_module.sleep(60)
 
 
@@ -188,9 +196,9 @@ if __name__ == '__main__':
         time_module.sleep(1)
 
     if not app_initialized:
-        logger.critical("\u274c Kiwoom API 초기화 실패. 서버 종료.")
-        send_telegram_message("\u274c Kiwoom API 초기화 실패")
+        logger.critical("❌ Kiwoom API 초기화 실패. 서버 종료.")
+        send_telegram_message("❌ Kiwoom API 초기화 실패")
         sys.exit(1)
 
-    logger.info(f"\ud83d\ude80 Flask 서버 실행: http://0.0.0.0:{API_SERVER_PORT}")
+    logger.info(f"🚀 Flask 서버 실행: http://0.0.0.0:{API_SERVER_PORT}")
     app.run(host="0.0.0.0", port=int(API_SERVER_PORT), debug=True, use_reloader=False)
