@@ -95,7 +95,7 @@ class KiwoomTrRequest:
             self.rq_name = rq_name
             self.tr_data = None # 이전 데이터 초기화
 
-            logger.info(f"TR 요청 시도 {attempt + 1}/{retry_attempts}: rq_name='{rq_name}', tr_code='{tr_code}', screen_no='{screen_no}'") # DEBUG -> INFO
+            logger.info(f"TR 요청 시도 {attempt + 1}/{retry_attempts}: rq_name='{rq_name}', tr_code='{tr_code}', screen_no='{screen_no}'") 
             
             # API 요청 간 최소 지연 시간 (TR 요청 제한 회피)
             time.sleep(0.5) 
@@ -112,7 +112,7 @@ class KiwoomTrRequest:
                 
                 # TR 데이터가 성공적으로 수신되었는지 확인
                 if self.tr_data is not None and not self.tr_data.get("error"):
-                    logger.info(f"TR 요청 성공 및 데이터 수신: {rq_name}") # DEBUG -> INFO
+                    logger.info(f"TR 요청 성공 및 데이터 수신: {rq_name}") 
                     return self.tr_data 
                 elif self.tr_data and self.tr_data.get("error"):
                     # 데이터 처리 중 오류가 발생했거나 타임아웃으로 인한 오류 데이터
@@ -144,10 +144,10 @@ class KiwoomTrRequest:
         """
         # KOA StudioSA 예제에 맞춰 모든 입력값을 명시적으로 설정
         self.kiwoom_helper.ocx.SetInputValue("계좌번호", account_no)
-        # 보안을 위해 비밀번호의 일부만 로그에 출력
+        # 보안을 위해 비밀번호의 일부만 로그에 출력 (실제 Kiwoom API에는 빈 문자열 전달)
         masked_password = self.account_password[:2] + '*' * (len(self.account_password) - 4) + self.account_password[-2:] if len(self.account_password) > 4 else '*' * len(self.account_password)
-        logger.info(f"SetInputValue: 계좌번호='{account_no}', 비밀번호='{masked_password}', 비밀번호입력매체구분='00', 조회구분='2'") # DEBUG -> INFO
-        self.kiwoom_helper.ocx.SetInputValue("비밀번호", self.account_password) # 계좌 비밀번호 사용
+        logger.info(f"SetInputValue: 계좌번호='{account_no}', 비밀번호='{masked_password}' (실제 API 전달 값: 빈 문자열), 비밀번호입력매체구분='00', 조회구분='2'") 
+        self.kiwoom_helper.ocx.SetInputValue("비밀번호", "") # 💡 모의투자 계좌의 경우 비밀번호를 공란으로 넘겨야 정상 작동
         self.kiwoom_helper.ocx.SetInputValue("비밀번호입력매체구분", "00") # 00 (공백불가)
         self.kiwoom_helper.ocx.SetInputValue("조회구분", "2") # 2:일반조회
 
@@ -163,9 +163,10 @@ class KiwoomTrRequest:
         """
         self.kiwoom_helper.ocx.SetInputValue("계좌번호", account_no)
         # opw00018은 계좌 비밀번호를 요구하지 않는 경우가 많지만, 안전을 위해 설정
+        # 보안을 위해 비밀번호의 일부만 로그에 출력 (실제 Kiwoom API에는 빈 문자열 전달)
         masked_password = self.account_password[:2] + '*' * (len(self.account_password) - 4) + self.account_password[-2:] if len(self.account_password) > 4 else '*' * len(self.account_password)
-        logger.info(f"SetInputValue: 계좌번호='{account_no}', 비밀번호='{masked_password}', 비밀번호입력매체구분='00'") # DEBUG -> INFO
-        self.kiwoom_helper.ocx.SetInputValue("비밀번호", self.account_password) # 계좌 비밀번호 사용
+        logger.info(f"SetInputValue: 계좌번호='{account_no}', 비밀번호='{masked_password}' (실제 API 전달 값: 빈 문자열), 비밀번호입력매체구분='00'")
+        self.kiwoom_helper.ocx.SetInputValue("비밀번호", "") # 💡 모의투자 계좌의 경우 비밀번호를 공란으로 넘겨야 정상 작동
         self.kiwoom_helper.ocx.SetInputValue("비밀번호입력매체구분", "00")
 
         screen_no = self._generate_unique_screen_no()
