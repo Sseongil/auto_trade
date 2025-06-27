@@ -1,5 +1,3 @@
-# modules/Kiwoom/monitor_positions.py
-
 import os
 import json
 import logging
@@ -143,3 +141,12 @@ class MonitorPositions:
                 del self.positions[stock_code]
                 self.save_positions()
                 logger.info(f"{stock_code} removed from positions.")
+
+    def mark_half_sold(self, stock_code):
+        with self.position_lock:
+            if stock_code in self.positions:
+                self.positions[stock_code]["half_exited"] = True
+                self.save_positions()
+                logger.info(f"[포지션 상태 갱신] {stock_code} 절반 익절 상태로 표시됨.")
+            else:
+                logger.warning(f"📌 절반 익절 상태 표시 실패: {stock_code} 포지션 없음.")

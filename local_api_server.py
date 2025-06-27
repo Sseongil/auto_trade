@@ -23,7 +23,9 @@ from modules.Kiwoom.kiwoom_query_helper import KiwoomQueryHelper
 from modules.Kiwoom.kiwoom_tr_request import KiwoomTrRequest
 from modules.Kiwoom.monitor_positions import MonitorPositions
 from modules.Kiwoom.trade_manager import TradeManager
+from modules.Kiwoom.condition_handler import ConditionHandler
 from modules.strategies.monitor_positions_strategy import monitor_positions_strategy 
+from modules.strategies.strategy_conditions_live import StrategyExecutor
 from modules.common.config import get_env, API_SERVER_PORT
 from modules.common.utils import get_current_time_str
 from modules.notify import send_telegram_message
@@ -68,10 +70,6 @@ def api_key_required(f):
 
 # --- Kiwoom API 초기화 ---
 def initialize_kiwoom_api_in_background_thread():
-    """
-    백그라운드 트레이딩 스레드에서 Kiwoom API 및 관련 객체들을 초기화합니다.
-    모든 COM 객체는 이 스레드 내에서 생성되고 사용되어야 합니다.
-    """
     kiwoom_helper_thread = None
     kiwoom_tr_request_thread = None
     monitor_positions_thread = None
@@ -120,7 +118,6 @@ def initialize_kiwoom_api_in_background_thread():
 
         logger.info(f"✅ Kiwoom API 연결 완료 (백그라운드 트레이딩 스레드) - 계좌번호: {account_number}")
 
-        # ✅ 여기서 계좌 정보 요청할 때 수정된 부분입니다
         account_info = kiwoom_tr_request_thread.request_account_info(account_number, timeout_ms=30000)
 
         if account_info and not account_info.get("error"):
@@ -150,21 +147,35 @@ def background_trading_loop():
         logger.critical("❌ 초기화 실패")
         return 
 
+    # ✅ 조건검색 핸들러 초기화
+    strategy_executor = StrategyExecutor(kiwoom_helper_thread, kiwoom_tr_request_thread, trade_manager_thread, monitor_positions_thread)
+    condition_handler = ConditionHandler(kiwoom_helper_thread, strategy_executor)
+    kiwoom_helper_thread.set_condition_callback(condition_handler.on_condition_stock_enter)
+
     while True:
         try:
             now = datetime.now()
+
+            # ✅ 조건검색은 장 시작 시간에 단 1회 실행
+            if time(9, 0) <= now.time() < time(9, 5) and not hasattr(background_trading_loop, "condition_started"):
+                condition_handler.load_conditions()
+                condition_handler.start_real_time_condition("전략1")  # <- 조건검색식 이름 정확히 입력
+                background_trading_loop.condition_started = True
+
             if time(9, 5) <= now.time() < time(15, 0):
                 logger.info(f"[{get_current_time_str()}] 매매 전략 실행 중...")
+
             monitor_positions_strategy(monitor_positions_thread, trade_manager_thread)
+
             with shared_state_lock:
                 shared_kiwoom_state["positions"] = monitor_positions_thread.get_all_positions()
                 shared_kiwoom_state["last_update_time"] = get_current_time_str()
+
             time_module.sleep(30)
         except Exception as e:
             logger.exception(f"🔥 루프 오류: {e}")
             send_telegram_message(f"🔥 루프 오류: {e}")
             time_module.sleep(60)
-
 
 # --- Flask API ---
 @app.route('/')
