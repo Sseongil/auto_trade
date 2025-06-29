@@ -1,89 +1,51 @@
-# modules/Kiwoom/kiwoom_query_helper.py (조건검색 기능 포함된 전체 수정본)
-
+import pythoncom
+import time
+import pandas as pd
 import logging
-from PyQt5.QAxContainer import QAxWidget
+from PyQt5.QtCore import QEventLoop, QTimer
 from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import QObject, QEventLoop
-from modules.Kiwoom.tr_event_loop import TrEventLoop
-from modules.common.utils import get_current_time_str
+from PyQt5.QAxContainer import QAxWidget
+from modules.error_codes import get_error_message
 
 logger = logging.getLogger(__name__)
 
-class KiwoomQueryHelper(QObject):
-    def __init__(self, ocx, app):
-        super().__init__()
-        self.ocx = ocx
-        self.app = app
-        self.tr_event_loop = TrEventLoop()
-        self.real_time_data = {}  # 실시간 시세 데이터 저장용
-        self.condition_list = {}  # 조건검색식 이름:인덱스 매핑
-
-        # 실시간 조건검색 편입 이벤트 연결
-        self.ocx.OnReceiveRealCondition.connect(self._on_receive_real_condition)
+class KiwoomQueryHelper:
+    def __init__(self, kiwoom_ocx, pyqt_app):
+        self.kiwoom = kiwoom_ocx
+        self.app = pyqt_app
+        self.filtered_df = pd.DataFrame()
 
     def connect_kiwoom(self, timeout_ms=10000):
-        self.ocx.dynamicCall("CommConnect()")
-        loop = QEventLoop()
-        self.ocx.OnEventConnect.connect(lambda err_code: loop.quit())
-        loop.exec_()
-        return True  # 연결 성공 여부는 이후 체크하도록
+        self.login_event_loop = QEventLoop()
+        self.kiwoom.OnEventConnect.connect(self._on_event_connect)
+        self.kiwoom.dynamicCall("CommConnect()")
 
-    def get_login_info(self, tag):
-        return self.ocx.dynamicCall("GetLoginInfo(QString)", tag)
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(self.login_event_loop.quit)
+        timer.start(timeout_ms)
+
+        self.login_event_loop.exec_()
+        timer.stop()
+
+        if self.kiwoom.dynamicCall("GetConnectState()") == 1:
+            logger.info("✅ 키움 API 로그인 성공")
+            return True
+        else:
+            logger.critical("❌ 키움 API 로그인 실패")
+            return False
+
+    def _on_event_connect(self, err_code):
+        msg = get_error_message(err_code)
+        logger.info(f"[로그인 이벤트] 코드: {err_code}, 메시지: {msg}")
+        if hasattr(self, 'login_event_loop'):
+            self.login_event_loop.quit()
 
     def SetRealReg(self, screen_no, code_list, fid_list, real_type):
-        self.ocx.dynamicCall("SetRealReg(QString, QString, QString, QString)",
-                             screen_no, code_list, fid_list, real_type)
+        self.kiwoom.dynamicCall("SetRealReg(QString, QString, QString, QString)",
+                                 screen_no, code_list, fid_list, real_type)
+        logger.info(f"📡 SetRealReg 호출: 화면번호={screen_no}, 종목={code_list}, FID={fid_list}")
 
-    def SetRealRemove(self, screen_no, code):
-        self.ocx.dynamicCall("SetRealRemove(QString, QString)", screen_no, code)
-
-    def get_stock_name(self, code):
-        return self.ocx.dynamicCall("GetMasterCodeName(QString)", code)
-
-    def generate_real_time_screen_no(self):
-        return "5000"
-
-    # ------------------ 조건검색 관련 메서드 ------------------
-
-    def get_condition_list(self):
-        """
-        조건검색식 이름과 인덱스를 딕셔너리로 반환
-        """
-        raw_str = self.ocx.dynamicCall("GetConditionNameList()")
-        condition_map = {}
-        for cond in raw_str.split(';'):
-            if not cond.strip():
-                continue
-            index, name = cond.split('^')
-            condition_map[name.strip()] = int(index.strip())
-
-        self.condition_list = condition_map
-        logger.info(f"📑 조건검색식 목록 로드: {list(condition_map.keys())}")
-        return condition_map
-
-    def SendCondition(self, screen_no, condition_name, index, search_type):
-        """
-        조건검색 실행 및 실시간 등록
-        - screen_no: 실시간 화면 번호 (예: '5000')
-        - condition_name: 조건검색식 이름
-        - index: 조건 인덱스
-        - search_type: 0=일회성 검색, 1=실시간 등록
-        """
-        logger.info(f"🧠 조건검색 실행: {condition_name} (Index: {index}, 실시간: {search_type})")
-        self.ocx.dynamicCall("SendCondition(QString, QString, int, int)",
-                             screen_no, condition_name, index, search_type)
-
-    def _on_receive_real_condition(self, code, event_type, condition_name, condition_index):
-        """
-        실시간 조건검색 편입/이탈 이벤트 수신
-        """
-        stock_name = self.get_stock_name(code)
-        logger.info(f"📡 [조건검색 이벤트] {stock_name}({code}) - {event_type} ({condition_name})")
-
-        if hasattr(self, "condition_callback") and callable(self.condition_callback):
-            if event_type == "I":  # 편입
-                self.condition_callback(code, stock_name)
-
-    def set_condition_callback(self, callback_fn):
-        self.condition_callback = callback_fn
+    def SetRealRemove(self, screen_no, code_list):
+        self.kiwoom.dynamicCall("SetRealRemove(QString, QString)", screen_no, code_list)
+        logger.info(f"📡 SetRealRemove 호출: 화면번호={screen_no}, 종목={code_list}")
