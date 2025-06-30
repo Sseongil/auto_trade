@@ -1,149 +1,90 @@
 # modules/trade_logger.py
 
-import sqlite3
 import os
+import csv
 import logging
 from datetime import datetime
 
-# 💡 LOG_DB_PATH 대신 TRADE_LOG_DB_PATH 임포트
-from modules.common.config import TRADE_LOG_DB_PATH 
-from modules.common.utils import get_current_time_str
-
 logger = logging.getLogger(__name__)
+
+# 거래 로그 파일 경로 (프로젝트 루트에 'logs' 디렉토리 생성)
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs')
+TRADE_LOG_FILE = os.path.join(LOG_DIR, 'trade_log.csv')
+
+# 로그 디렉토리 생성
+os.makedirs(LOG_DIR, exist_ok=True)
 
 class TradeLogger:
     def __init__(self):
-        self.db_path = TRADE_LOG_DB_PATH
-        self._ensure_db_and_table()
-        logger.info(f"{get_current_time_str()}: TradeLogger initialized. DB Path: {self.db_path}")
-
-    def _ensure_db_and_table(self):
-        """데이터베이스 파일과 trade_logs 테이블이 존재하는지 확인하고 없으면 생성합니다."""
-        conn = None
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS trade_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    stock_code TEXT NOT NULL,
-                    stock_name TEXT NOT NULL,
-                    trade_type TEXT NOT NULL,
-                    order_price REAL,
-                    executed_price REAL,
-                    quantity INTEGER NOT NULL,
-                    pnl_amount REAL,
-                    pnl_pct REAL,
-                    account_balance_after_trade REAL,
-                    strategy_name TEXT
-                )
-            """)
-            conn.commit()
-            logger.info("Trade_logs table checked/created successfully.")
-        except sqlite3.Error as e:
-            logger.error(f"Error ensuring DB and table: {e}", exc_info=True)
-        finally:
-            if conn:
-                conn.close()
-
-    def log_trade(self, stock_code, stock_name, trade_type, order_price, executed_price, 
-                  quantity, pnl_amount, pnl_pct, account_balance_after_trade, strategy_name="N/A"):
         """
-        거래 내역을 데이터베이스에 기록합니다.
-        
+        TradeLogger 클래스 초기화.
+        로그 파일이 없으면 헤더를 추가합니다.
+        """
+        self._ensure_header()
+
+    def _ensure_header(self):
+        """거래 로그 파일이 없으면 헤더를 추가합니다."""
+        if not os.path.exists(TRADE_LOG_FILE) or os.stat(TRADE_LOG_FILE).st_size == 0:
+            with open(TRADE_LOG_FILE, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                writer.writerow(['timestamp', 'stock_code', 'stock_name', 'trade_type', 'quantity', 'price', 'order_no', 'message'])
+            logger.info(f"거래 로그 파일 헤더 생성: {TRADE_LOG_FILE}")
+
+    def log_trade(self, stock_code: str, stock_name: str, trade_type: str, quantity: int, price: float, order_no: str = None, message: str = ""):
+        """
+        거래 내역을 로그 파일에 기록합니다.
+
         Args:
             stock_code (str): 종목 코드
             stock_name (str): 종목명
-            trade_type (str): 거래 유형 ('매수', '매도', '익절', '손절', '보유종료')
-            order_price (float): 주문 가격
-            executed_price (float): 체결 가격
-            quantity (int): 거래 수량
-            pnl_amount (float): 손익 금액 (매도 시에만 유효)
-            pnl_pct (float): 손익률 (%) (매도 시에만 유효)
-            account_balance_after_trade (float): 거래 후 계좌 예수금 (또는 총자산)
-            strategy_name (str): 사용된 전략명 (기본값 "N/A")
+            trade_type (str): 거래 유형 (예: 'BUY_ORDER_REQUEST', 'BUY_FILLED', 'SELL_ORDER_REQUEST', 'SELL_FILLED', 'MANUAL_NOTE')
+            quantity (int): 수량
+            price (float): 가격
+            order_no (str, optional): 주문 번호. Defaults to None.
+            message (str, optional): 추가 메시지. Defaults to "".
         """
-        conn = None
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            cursor.execute("""
-                INSERT INTO trade_logs (timestamp, stock_code, stock_name, trade_type, 
-                                        order_price, executed_price, quantity, 
-                                        pnl_amount, pnl_pct, account_balance_after_trade, strategy_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (timestamp, stock_code, stock_name, trade_type, 
-                  order_price, executed_price, quantity, 
-                  pnl_amount, pnl_pct, account_balance_after_trade, strategy_name))
-            conn.commit()
-            logger.info(f"📊 Trade logged: [{trade_type}] {stock_name}({stock_code}), Qty: {quantity}, Price: {executed_price}")
-        except sqlite3.Error as e:
-            logger.error(f"Error logging trade: {e}", exc_info=True)
-        finally:
-            if conn:
-                conn.close()
+            with open(TRADE_LOG_FILE, 'a', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                writer.writerow([timestamp, stock_code, stock_name, trade_type, quantity, price, order_no, message])
+            logger.info(f"거래 로그 기록: [{trade_type}] {stock_name}({stock_code}) {quantity}주 @ {price}원 (주문번호: {order_no if order_no else 'N/A'})")
+        except Exception as e:
+            logger.error(f"거래 로그 기록 중 오류 발생: {e}", exc_info=True)
 
-    def get_trades(self, limit=100):
-        """최근 거래 내역을 조회합니다."""
-        conn = None
+    def get_trade_log(self, stock_code: str = None):
+        """
+        저장된 모든 거래 로그를 읽어와 리스트 형태로 반환합니다.
+        stock_code가 제공되면 해당 종목의 로그만 필터링하여 반환합니다.
+        """
+        logs = []
+        if not os.path.exists(TRADE_LOG_FILE):
+            return logs
+
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM trade_logs ORDER BY timestamp DESC LIMIT ?", (limit,))
-            rows = cursor.fetchall()
-            columns = [description[0] for description in cursor.description]
-            return [dict(zip(columns, row)) for row in rows]
-        except sqlite3.Error as e:
-            logger.error(f"Error fetching trades: {e}", exc_info=True)
-            return []
-        finally:
-            if conn:
-                conn.close()
+            with open(TRADE_LOG_FILE, 'r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if stock_code is None or row.get('stock_code') == stock_code:
+                        logs.append(row)
+        except Exception as e:
+            logger.error(f"거래 로그 읽기 중 오류 발생: {e}", exc_info=True)
+        return logs
 
-    def get_daily_summary(self, date_str=None):
-        """특정 날짜의 매매 요약을 반환합니다 (YYYY-MM-DD 형식)."""
-        if date_str is None:
-            date_str = datetime.today().strftime("%Y-%m-%d")
-
-        conn = None
+    def clear_trade_log(self):
+        """
+        모든 거래 로그를 삭제합니다. (주의: 되돌릴 수 없는 작업입니다)
+        """
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # 총 거래 횟수
-            cursor.execute("SELECT COUNT(*) FROM trade_logs WHERE DATE(timestamp) = ?", (date_str,))
-            total_trades = cursor.fetchone()[0]
-
-            # 총 손익 금액 및 수익률
-            cursor.execute("SELECT SUM(pnl_amount), AVG(pnl_pct) FROM trade_logs WHERE DATE(timestamp) = ? AND (trade_type = '매도' OR trade_type = '익절' OR trade_type = '손절' OR trade_type = '보유종료')", (date_str,))
-            total_pnl_amount, avg_pnl_pct = cursor.fetchone()
-            total_pnl_amount = total_pnl_amount if total_pnl_amount is not None else 0.0
-            avg_pnl_pct = avg_pnl_pct if avg_pnl_pct is not None else 0.0
-
-            # 승리/패배 횟수
-            cursor.execute("SELECT COUNT(*) FROM trade_logs WHERE DATE(timestamp) = ? AND (trade_type = '매도' OR trade_type = '익절' OR trade_type = '손절' OR trade_type = '보유종료') AND pnl_amount > 0", (date_str,))
-            win_trades = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM trade_logs WHERE DATE(timestamp) = ? AND (trade_type = '매도' OR trade_type = '익절' OR trade_type = '손절' OR trade_type = '보유종료') AND pnl_amount <= 0", (date_str,))
-            loss_trades = cursor.fetchone()[0]
-
-            win_rate = (win_trades / (win_trades + loss_trades)) * 100 if (win_trades + loss_trades) > 0 else 0.0
-
-            return {
-                "date": date_str,
-                "total_trades": total_trades,
-                "total_pnl_amount": total_pnl_amount,
-                "avg_pnl_pct": avg_pnl_pct,
-                "win_trades": win_trades,
-                "loss_trades": loss_trades,
-                "win_rate": win_rate
-            }
-
-        except sqlite3.Error as e:
-            logger.error(f"Error fetching daily summary for {date_str}: {e}", exc_info=True)
-            return None
-        finally:
-            if conn:
-                conn.close()
+            if os.path.exists(TRADE_LOG_FILE):
+                os.remove(TRADE_LOG_FILE)
+                self._ensure_header() # 헤더 다시 생성
+                logger.warning(f"모든 거래 로그가 삭제되었습니다: {TRADE_LOG_FILE}")
+                return True
+            else:
+                logger.info("삭제할 거래 로그 파일이 없습니다.")
+                return False
+        except Exception as e:
+            logger.error(f"거래 로그 삭제 중 오류 발생: {e}", exc_info=True)
+            return False
 
