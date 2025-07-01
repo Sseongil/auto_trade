@@ -1,13 +1,12 @@
 # local_api_server.py
 
-from flask import render_template
 import os
 import sys
 import json
 import time as time_module
 import logging
+from flask import Flask, request, jsonify, render_template # render_template 임포트 추가
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify
 from datetime import datetime, time
 import threading
 
@@ -83,7 +82,7 @@ def initialize_kiwoom_api_in_background_thread(pyqt_app):
 
     if not kiwoom_helper.connect_kiwoom(timeout_ms=10000):
         logger.critical("❌ 키움 API 연결 실패. 애플리케이션을 종료합니다.")
-        send_telegram_message("🚨 키움 API 연결 실패. 서버 종료.")
+        send_telegram_message("� 키움 API 연결 실패. 서버 종료.")
         return None, None, None, None
 
     account_number = os.getenv("ACCOUNT_NUMBERS", "").split(',')[0].strip()
@@ -183,7 +182,8 @@ def background_trading_loop(pyqt_app):
 @app.route('/')
 def home():
     """서버 상태 확인을 위한 기본 페이지."""
-     return render_template('index.html') # templates 폴더의 index.html을 반환
+    return render_template('index.html') # templates 폴더의 index.html을 반환
+
 @app.route('/status')
 @api_key_required
 def status():
@@ -320,3 +320,4 @@ if __name__ == '__main__':
     # Flask 서버가 종료되면 이 부분이 실행될 수 있도록 설계
     # 하지만 실제로는 Flask 서버가 계속 실행되므로 이 부분은 도달하지 않을 수 있습니다.
     # pyqt_app.exec_() # 이 줄은 Flask 서버와 함께 실행될 때 주의 필요
+�
