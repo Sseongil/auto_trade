@@ -40,8 +40,8 @@ class TradeManager:
         self.last_received_order_no = None # 가장 최근에 체결 통보된 주문번호
 
         # 키움 API 이벤트 연결
-        self.kiwoom_helper.ocx.OnReceiveMsg.connect(self._on_receive_msg)
-        self.kiwoom_helper.ocx.OnReceiveChejanData.connect(self._on_receive_chejan_data)
+        self.kiwoom_helper.kiwoom.OnReceiveMsg.connect(self._on_receive_msg)
+        self.kiwoom_helper.kiwoom.OnReceiveChejanData.connect(self._on_receive_chejan_data)
         
         logger.info(f"{get_current_time_str()}: TradeManager initialized for account {self.account_number}.")
 

@@ -1,39 +1,37 @@
-# ✅ 환경 설정 파일
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# VS Code
+.vscode/
+
+# 환경 설정
 .env
 .env.*
 
-# ✅ Python 캐시
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# ✅ 가상환경 폴더
+# 가상환경
 venv/
 env/
 .venv/
 
-# ✅ VSCode 설정
-.vscode/
-
-# ✅ 로그 및 데이터
+# 로그 및 백업
 logs/
 *.log
 *.bak
-*.tmp
 *.swp
-*~
+*.tmp
+*.db
 
-# ✅ Kiwoom API 관련
-OpenAPI/
-opstarter.log
-system.log
+# 파이썬 빌드
+*.egg-info/
+build/
+dist/
 
-# ✅ OS별 파일
+# 시스템
 .DS_Store
 Thumbs.db
-
-# ✅ 프로젝트 결과물
-trade_log.csv
-status.json
-data/
