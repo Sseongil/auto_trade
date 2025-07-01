@@ -5,4 +5,4 @@ __pycache__/
 trade_log.csv
 status.json
 data/
-logs/
+logs/".env" 
