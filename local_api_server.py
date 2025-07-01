@@ -1,5 +1,6 @@
 # local_api_server.py
 
+from flask import render_template
 import os
 import sys
 import json
@@ -182,8 +183,7 @@ def background_trading_loop(pyqt_app):
 @app.route('/')
 def home():
     """서버 상태 확인을 위한 기본 페이지."""
-    return "Local API Server is running!"
-
+     return render_template('index.html') # templates 폴더의 index.html을 반환
 @app.route('/status')
 @api_key_required
 def status():
