@@ -44,15 +44,24 @@ MAX_CURRENT_DAILY_CHANGE_PCT = float(os.getenv("MAX_CURRENT_DAILY_CHANGE_PCT", 1
 DEFAULT_LOT_SIZE = int(os.getenv("DEFAULT_LOT_SIZE", 1)) # 최소 거래 단위 (보통 1주)
 
 # 익절/손절 전략 파라미터 (예시 값, 실제 전략에 맞게 조정 필요)
-TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", 2.0)) # 1차 익절 수익률 (%)
-TRAIL_STOP_PCT = float(os.getenv("TRAIL_STOP_PCT", 0.8)) # 트레일링 스탑 손절률 (최고가 대비 하락률)
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", -1.2)) # 절대 손절률 (%)
+TAKE_PROFIT_PCT_1ST = float(os.getenv("TAKE_PROFIT_PCT_1ST", 2.0)) # 1차 익절 수익률 (%)
+TRAIL_STOP_PCT_2ND = float(os.getenv("TRAIL_STOP_PCT_2ND", 0.8)) # 트레일링 스탑 손절률 (최고가 대비 하락률)
+STOP_LOSS_PCT_ABS = float(os.getenv("STOP_LOSS_PCT_ABS", 1.2)) # 절대 손절률 (%) (양수로 표현, 손실률이므로 내부적으로 음수 처리)
 MAX_HOLD_DAYS = int(os.getenv("MAX_HOLD_DAYS", 5)) # 최대 보유 일수
+
+# ✅ 신규 추가: 익절/손절 전략 우선순위 (PROFIT_FIRST 또는 LOSS_FIRST)
+EXIT_STRATEGY_PRIORITY = os.getenv("EXIT_STRATEGY_PRIORITY", "PROFIT_FIRST") # 기본값: 익절 우선
+
+# ✅ 신규 추가: 매수 후 최소 보유 시간 (분) - 이 시간 동안은 매도 전략 미적용
+MIN_HOLD_TIME_MINUTES = int(os.getenv("MIN_HOLD_TIME_MINUTES", 5)) # 기본값: 5분
 
 # 제외할 종목명 키워드
 EXCLUDE_NAME_KEYWORDS = ["스팩", "우", "ETN", "ETF"]
 # 제외할 종목 상태 키워드
-EXCLUDE_STATUS_KEYWORDS = ["관리종목", "투자위험", "투자경고", "거래정지", "정리매매", "우선주", "스팩", "ETF", "ETN", "초저유동성"]
+EXCLUDE_STATUS_KEYWORDS = [
+    "관리종목", "투자위험", "투자경고", "거래정지", "정리매매", "우선주", "스팩", "ETF", "ETN", "초저유동성",
+    "증거금100%", "신용가능", "담보대출", "대주가능", "신용융자", "신용대주" # 추가 제외 키워드
+]
 
 # 시장 코드
 MARKET_CODES = ["0", "10"] # "0": KOSPI, "10": KOSDAQ

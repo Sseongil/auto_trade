@@ -28,10 +28,14 @@ def send_telegram_message(message: str):
     }
     try:
         response = requests.post(url, json=payload, timeout=5)
-        response.raise_for_status() # HTTP 오류 발생 시 예외 발생
+        # ✅ 개선 제안 반영: HTTP 상태 코드 확인
+        if response.status_code != 200:
+            logger.warning(f"⚠️ 텔레그램 응답 실패: HTTP {response.status_code}, 응답: {response.text}")
+            send_telegram_message(f"❌ 텔레그램 메시지 전송 실패 (HTTP {response.status_code}): {message[:30]}...") # 실패 알림은 짧게
+        response.raise_for_status() # HTTP 오류 발생 시 예외 발생 (200이 아닌 경우)
         logger.info(f"✅ 텔레그램 메시지 전송 성공: {message[:50]}...") # 메시지 일부만 로깅
     except requests.exceptions.RequestException as e:
-        logger.error(f"❌ 텔레그램 메시지 전송 실패: {e}")
+        logger.error(f"❌ 텔레그램 메시지 전송 중 네트워크/API 오류 발생: {e}")
     except Exception as e:
         logger.error(f"❌ 텔레그램 메시지 전송 중 알 수 없는 오류 발생: {e}")
 

@@ -1,8 +1,8 @@
 # modules/strategies/main_strategy_loop.py
 
 import logging
-from datetime import datetime, time
 import time as time_module
+from datetime import datetime, time
 
 from modules.strategies.check_conditions_runner import get_candidate_stocks_from_condition
 from modules.strategies.buy_strategy import execute_buy_strategy
@@ -12,89 +12,114 @@ from modules.notify import send_telegram_message
 
 logger = logging.getLogger(__name__)
 
+# 전략 활성화/비활성화 상태를 저장할 전역 변수 (local_api_server에서 제어)
+strategy_flags = {
+    "condition_check_enabled": False,
+    "buy_strategy_enabled": False,
+    "exit_strategy_enabled": False,
+    "real_condition_name": None, # 현재 등록된 실시간 조건식 이름
+    "real_condition_index": None # 현재 등록된 실시간 조건식 인덱스
+}
+
+def set_strategy_flag(strategy_name: str, enabled: bool):
+    """
+    특정 전략의 활성화 상태를 설정합니다.
+    """
+    if strategy_name in strategy_flags:
+        strategy_flags[strategy_name] = enabled
+        logger.info(f"✅ 전략 '{strategy_name}' 상태 변경: {'활성화' if enabled else '비활성화'}")
+    else:
+        logger.warning(f"⚠️ 알 수 없는 전략 이름: {strategy_name}")
+
+def set_real_condition_info(condition_name: str, condition_index: int):
+    """
+    현재 등록된 실시간 조건식 정보를 설정합니다.
+    """
+    strategy_flags["real_condition_name"] = condition_name
+    strategy_flags["real_condition_index"] = condition_index
+    logger.info(f"✅ 실시간 조건식 정보 설정: 이름='{condition_name}', 인덱스={condition_index}")
+
 def run_condition_check_step(kiwoom_helper):
     """
-    조건 검색을 실행하고, 결과를 kiwoom_helper.filtered_df에 저장합니다.
-    이후 실시간 데이터 수신을 위해 종목들을 등록합니다.
+    조건 검색 단계를 실행합니다.
     """
-    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    logger.info(f"[{current_time_str}] 📊 조건검색 실행 시작 (스레드 기반 필터)...")
+    if not strategy_flags["condition_check_enabled"]:
+        logger.info("⏸️ 조건 검색 전략 비활성화됨. 건너뜜.")
+        return
 
-    candidate_df = get_candidate_stocks_from_condition()
-    kiwoom_helper.filtered_df = candidate_df # 필터링된 종목 목록을 kiwoom_helper에 저장
+    logger.info("📊 조건검색 실행 시작 (스레드 기반 필터)...")
+    candidate_df = get_candidate_stocks_from_condition(kiwoom_helper) # kiwoom_helper 인자 전달
+    kiwoom_helper.filtered_df = candidate_df
+    logger.info(f"📈 조건검색 통과 종목 수: {len(candidate_df)}개")
 
-    # --- 개발/테스트를 위한 팁 ---
-    # 조건 검색 결과가 없을 때 테스트를 위해 아래 주석을 해제하고 샘플 데이터를 사용할 수 있습니다.
-    # if candidate_df.empty:
-    #     logger.warning("📭 조건검색 결과: 조건을 만족하는 종목 없음. 테스트용 샘플 데이터 로드.")
-    #     kiwoom_helper.filtered_df = pd.DataFrame([
-    #         {"ticker": "005930", "name": "삼성전자", "price": 80000},
-    #     ])
-    #     candidate_df = kiwoom_helper.filtered_df
-    # ----------------------------
-
-    logger.info(f"[{current_time_str}] 📈 조건검색 통과 종목 수: {len(candidate_df)}개")
-
+    # 조건 검색 결과가 있을 경우 실시간 데이터 등록
     if not candidate_df.empty:
         tickers_to_register = candidate_df["ticker"].tolist()
-        # 고유한 실시간 화면번호 생성 (KiwoomQueryHelper 내부에서 관리)
         screen_no = kiwoom_helper.generate_real_time_screen_no()
 
         try:
-            # SetRealReg 호출 시, 기존에 등록된 동일 화면번호의 종목들은 자동으로 해제됩니다.
-            # "0"은 종목 추가, "1"은 종목 제거 (여기서는 추가)
             kiwoom_helper.SetRealReg(screen_no, ";".join(tickers_to_register), REALTIME_FID_LIST, "0")
-            logger.info(f"[{current_time_str}] 📡 실시간 데이터 등록 완료: {len(tickers_to_register)} 종목 (화면번호: {screen_no})")
+            logger.info(f"📡 실시간 데이터 등록 완료: {len(tickers_to_register)} 종목")
         except Exception as e:
-            logger.error(f"[{current_time_str}] ❌ 실시간 데이터 등록 실패: {e}", exc_info=True)
-            send_telegram_message(f"❌ 실시간 데이터 등록 실패: {e}")
-        time_module.sleep(3) # 실시간 데이터 수신을 위한 짧은 대기
+            logger.error(f"❌ 실시간 데이터 등록 실패: {e}", exc_info=True)
+        time_module.sleep(3) # 실시간 데이터 수신을 위한 대기
 
 def run_buy_strategy_step(kiwoom_helper, kiwoom_tr_request, trade_manager, monitor_positions):
     """
-    매수 전략을 실행합니다.
-    kiwoom_helper.filtered_df에 저장된 종목들을 대상으로 매수를 시도합니다.
+    매수 전략 단계를 실행합니다.
     """
-    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    logger.info(f"[{current_time_str}] 🛒 매수 전략 실행 시작...")
+    if not strategy_flags["buy_strategy_enabled"]:
+        logger.info("⏸️ 매수 전략 비활성화됨. 건너뜜.")
+        return
 
-    # execute_buy_strategy 함수는 kiwoom_helper.filtered_df를 참조하여 매수 대상을 결정합니다.
-    # 만약 실시간 조건 편입 이벤트 등 특정 단일 종목에 대한 즉각적인 매수 로직을 구현한다면,
-    # 해당 로직에서 kiwoom_tr_request, trade_manager 등 필요한 모든 인자를 명시적으로 전달해야 합니다.
+    logger.info("💰 매수 전략 실행 시작...")
     execute_buy_strategy(kiwoom_helper, kiwoom_tr_request, trade_manager, monitor_positions)
-
-    logger.info(f"[{current_time_str}] 🛒 매수 전략 실행 종료.")
+    logger.info("💰 매수 전략 실행 종료.")
 
 def run_exit_strategy_step(kiwoom_helper, trade_manager, monitor_positions):
     """
-    익절/손절 전략을 실행합니다.
-    현재 보유 중인 포지션들을 대상으로 매도 조건을 검사합니다.
+    익절/손절 전략 단계를 실행합니다.
     """
-    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    logger.info(f"[{current_time_str}] 💸 익절/손절 전략 실행 시작...")
+    if not strategy_flags["exit_strategy_enabled"]:
+        logger.info("⏸️ 익절/손절 전략 비활성화됨. 건너뜜.")
+        return
 
+    logger.info("📉 익절/손절 전략 실행 시작...")
     execute_exit_strategy(kiwoom_helper, trade_manager, monitor_positions)
+    logger.info("📉 익절/손절 전략 실행 종료.")
 
-    logger.info(f"[{current_time_str}] 💸 익절/손절 전략 실행 종료.")
-
-# NOTE: run_daily_trading_cycle 함수는 현재 local_api_server.py에서 개별 스텝으로 분리되어 호출됩니다.
-# 따라서 이 함수는 직접 사용되지 않을 수 있습니다.
-def run_daily_trading_cycle(kiwoom_helper, kiwoom_tr_request, trade_manager, monitor_positions):
+def run_daily_trading_cycle(kiwoom_helper, kiwoom_tr_request, monitor_positions, trade_manager):
     """
-    하루 동안의 주요 트레이딩 사이클을 실행합니다.
-    (조건 검색 -> 매수 전략 -> 익절/손절 전략)
+    매일의 트레이딩 사이클을 실행합니다.
     """
-    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    logger.info(f"[{current_time_str}] 🚀 메인 전략 루프 시작")
+    now_time = datetime.now().time()
 
-    # 1. 조건 검색 및 실시간 등록
-    run_condition_check_step(kiwoom_helper)
+    # 장 시작 전 (예: 8시 30분 ~ 9시) 또는 장 마감 후 (15시 30분 이후)
+    if not (time(9, 0) <= now_time < time(15, 30)):
+        logger.info("⏸️ 장 시간 외 대기 중...")
+        # 장 마감 후에는 실시간 데이터 등록 해제
+        if now_time >= time(15, 30):
+            kiwoom_helper.SetRealRemove("ALL", "ALL")
+            logger.info("✅ 장 마감. 모든 실시간 데이터 등록 해제.")
+            # 조건 검색 실행 여부 초기화 (다음 날 재실행을 위해)
+            kiwoom_helper.is_condition_checked = False
+            strategy_flags["real_condition_name"] = None
+            strategy_flags["real_condition_index"] = None
+        return
 
-    # 2. 매수 전략 실행
+    logger.info(f"🚀 메인 전략 루프 실행 중... (현재 시각: {now_time.strftime('%H:%M:%S')})")
+
+    # 1. 조건 검색 단계 (하루에 한 번 또는 필요 시)
+    # is_condition_checked 플래그를 사용하여 하루에 한 번만 실행되도록 제어
+    if not kiwoom_helper.is_condition_checked:
+        run_condition_check_step(kiwoom_helper)
+        kiwoom_helper.is_condition_checked = True # 조건 검색 완료 플래그 설정
+
+    # 2. 매수 전략 단계
     run_buy_strategy_step(kiwoom_helper, kiwoom_tr_request, trade_manager, monitor_positions)
 
-    # 3. 익절/손절 전략 실행
+    # 3. 익절/손절 전략 단계
     run_exit_strategy_step(kiwoom_helper, trade_manager, monitor_positions)
 
-    logger.info(f"[{current_time_str}] 🏁 메인 전략 루프 종료")
+    logger.info("🔄 메인 전략 루프 한 사이클 완료.")
 

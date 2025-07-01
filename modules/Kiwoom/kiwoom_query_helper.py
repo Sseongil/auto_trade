@@ -1,375 +1,319 @@
 # modules/Kiwoom/kiwoom_query_helper.py
 
 import logging
-import pandas as pd
 import time
-from PyQt5.QtCore import QEventLoop, QTimer, pyqtSignal, QObject
+import pandas as pd
+import pythoncom # COM 객체 초기화를 위해 필요
+from PyQt5.QtCore import QEventLoop, QTimer, QObject, pyqtSignal # QObject, pyqtSignal 추가
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QAxContainer import QAxWidget
-import pythoncom # COM 초기화를 위해 필요
-
 from modules.common.error_codes import get_error_message
-from modules.common.utils import get_current_time_str
-from modules.common.config import REALTIME_SCREEN_NO_PREFIX # REALTIME_SCREEN_NO_PREFIX 임포트
+from modules.Kiwoom.tr_event_loop import TrEventLoop # TR 이벤트 루프 임포트
 
 logger = logging.getLogger(__name__)
 
-class KiwoomQueryHelper(QObject):
-    # 실시간 데이터를 외부에 알리기 위한 시그널
-    real_time_signal = pyqtSignal(dict) 
-    # 실시간 조건검색 결과를 외부에 알리기 위한 시그널
-    real_condition_signal = pyqtSignal(str, str, str, str) # 종목코드, 이벤트타입, 조건명, 조건인덱스
+class KiwoomQueryHelper(QObject): # QObject 상속
+    # 실시간 데이터 수신 시 외부로 시그널 전송
+    real_time_signal = pyqtSignal(dict)
+    # TR 데이터 수신 시 외부로 시그널 전송 (필요시)
+    tr_data_signal = pyqtSignal(str, str, str, dict)
 
-    def __init__(self, kiwoom_ocx, pyqt_app: QApplication):
+    def __init__(self, kiwoom_ocx: QAxWidget, pyqt_app: QApplication):
         super().__init__()
         self.kiwoom = kiwoom_ocx
         self.app = pyqt_app
         self.connected = False
         self.filtered_df = pd.DataFrame()
-        self.is_condition_checked = False
-        self.real_time_data = {} # 실시간 데이터 저장 딕셔너리
-        self.condition_list = {} # 조건검색식 목록 저장
-        self._stock_name_cache = {} # 종목명 캐시 (새로 추가)
-        self._real_time_screen_no_counter = int(REALTIME_SCREEN_NO_PREFIX + "00") # 실시간 화면번호 카운터 초기화 (새로 추가)
+        self.is_condition_checked = False # 조건 검색 실행 여부 플래그
+        self.real_time_data = {} # 실시간 데이터를 저장할 딕셔너리
+        self.condition_list = {} # 조건식 목록
+        self.tr_event_loop = TrEventLoop() # TR 요청 대기용 이벤트 루프
+        self._stock_name_cache = {} # 종목명 캐시
+        self.current_tr_code = None # 현재 TR 요청 코드
 
-        # TR 요청 응답 대기용 이벤트 루프
-        self.tr_event_loop = QEventLoop()
-        self.tr_data = None # TR 응답 데이터
-
-        # 로그인 이벤트 루프 및 상태
-        self.login_event_loop = QEventLoop()
-        self._login_done = False
-        self._login_error = None
-
-        # 키움 API 이벤트 연결
+        # Kiwoom OCX 이벤트 연결
         self.kiwoom.OnEventConnect.connect(self._on_event_connect)
-        self.kiwoom.OnReceiveTrData.connect(self._on_receive_tr_data)
         self.kiwoom.OnReceiveRealData.connect(self._on_receive_real_data)
-        self.kiwoom.OnReceiveMsg.connect(self._on_receive_msg)
-        self.kiwoom.OnReceiveChejanData.connect(self._on_receive_chejan_data)
-        self.kiwoom.OnReceiveRealCondition.connect(self._on_receive_real_condition) # 실시간 조건검색 이벤트 연결
-
-        logger.info("KiwoomQueryHelper initialized.")
+        self.kiwoom.OnReceiveTrData.connect(self._on_receive_tr_data)
+        self.kiwoom.OnReceiveRealCondition.connect(self._on_receive_real_condition) # 실시간 조건 검색 이벤트
 
     def connect_kiwoom(self, timeout_ms=10000):
-        """
-        키움 API에 로그인합니다.
-        """
-        logger.info("🔌 Attempting to connect to Kiwoom API (CommConnect call)")
+        """키움 API에 연결을 시도하고 로그인 완료까지 대기합니다."""
+        self.login_event_loop = QEventLoop()
         self.kiwoom.dynamicCall("CommConnect()")
 
-        # Execute login event loop
         timer = QTimer()
         timer.setSingleShot(True)
         timer.timeout.connect(self.login_event_loop.quit)
         timer.start(timeout_ms)
 
         self.login_event_loop.exec_()
+        timer.stop()
 
-        if not self._login_done:
-            self._login_error = "Login timeout"
-            logger.error("❌ Login timeout")
-            return False
-
-        if self._login_error:
-            logger.error(f"❌ Login failed: {self._login_error}")
-            return False
-
-        self.connected = True
-        logger.info("✅ Kiwoom API connection successful")
-        return True
-
-    def disconnect_kiwoom(self):
-        """키움 API 연결을 해제합니다."""
         if self.kiwoom.dynamicCall("GetConnectState()") == 1:
-            self.kiwoom.dynamicCall("CommTerminate()")
-            self.connected = False
-            logger.info("🔌 Kiwoom API disconnected.")
+            logger.info("✅ 키움 API 로그인 성공")
+            self.connected = True
+            return True
         else:
-            logger.info("🔌 Kiwoom API is already disconnected.")
+            logger.critical("❌ 키움 API 로그인 실패")
+            self.connected = False
+            return False
 
     def _on_event_connect(self, err_code):
-        """CommConnect 결과에 대한 이벤트 핸들러."""
+        """로그인 이벤트 수신 시 호출됩니다."""
         msg = get_error_message(err_code)
-        if err_code == 0:
-            self._login_done = True
-            self._login_error = None
-            logger.info(f"✅ Login event success: {msg}")
-        else:
-            self._login_done = True
-            self._login_error = f"Error code {err_code} ({msg})"
-            logger.error(f"❌ Login event failed: {self._login_error}")
-        
-        if self.login_event_loop.isRunning():
+        logger.info(f"[로그인 이벤트] 코드: {err_code}, 메시지: {msg}")
+        if hasattr(self, 'login_event_loop'):
             self.login_event_loop.quit()
 
-    def _on_receive_tr_data(self, screen_no, rq_name, tr_code, record_name, prev_next, data_len, error_code, message, splm_msg):
-        """
-        TR 데이터 수신 이벤트 핸들러.
-        수신된 TR 데이터를 처리하고 tr_event_loop에 설정합니다.
-        """
-        logger.info(f"TR received: Screen No. {screen_no}, Request Name: {rq_name}, TR Code: {tr_code}")
-        
-        if tr_code == "opt10081": # 일봉 데이터
-            df_columns = ["일자", "현재가", "거래량", "시가", "고가", "저가"]
-            rows = []
-            repeat_cnt = self.kiwoom.dynamicCall("GetRepeatCnt(QString, QString)", tr_code, rq_name)
-            
-            for i in range(repeat_cnt):
-                row_data = {}
-                for col_name in df_columns:
-                    data = self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)",
-                                                   tr_code, rq_name, i, col_name).strip()
-                    row_data[col_name] = data
-                rows.append(row_data)
-            self.tr_data = pd.DataFrame(rows)
-            
-        elif tr_code == "opw00001": # 예수금 요청 TR
-            deposit = self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, 0, "예수금").strip()
-            self.tr_data = {"예수금": int(deposit)}
-        
-        elif tr_code == "opw00018": # 계좌 잔고 TR
-            account_data = {}
-            account_data["총평가금액"] = self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, 0, "총평가금액").strip()
-            account_data["총손익금액"] = self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, 0, "총손익금액").strip()
-            
-            positions = []
-            repeat_cnt = self.kiwoom.dynamicCall("GetRepeatCnt(QString, QString)", tr_code, rq_name)
-            for i in range(repeat_cnt):
-                item = {}
-                item["종목코드"] = self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "종목코드").strip()
-                item["종목명"] = self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "종목명").strip()
-                item["보유수량"] = int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "보유수량").strip())
-                item["매입가"] = int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "매입가").strip())
-                item["현재가"] = int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "현재가").strip())
-                positions.append(item)
-            account_data["보유종목"] = positions
-            self.tr_data = account_data
-        
-        else:
-            logger.warning(f"Unhandled TR code: {tr_code}")
-            self.tr_data = {"error": f"Unhandled TR code: {tr_code}"}
+    def get_login_info(self, tag: str) -> str:
+        """로그인 정보를 반환합니다 (예: "ACCNO", "USER_ID")."""
+        return self.kiwoom.dynamicCall("GetLoginInfo(QString)", tag).strip()
 
-        if self.tr_event_loop.isRunning():
-            self.tr_event_loop.quit()
-
-    def _on_receive_real_data(self, stock_code, real_type, real_data_str):
+    def get_code_list_by_market(self, market: str) -> list:
         """
-        실시간 데이터 수신 이벤트 핸들러.
-        실시간 데이터(FID)를 파싱하고 self.real_time_data에 저장한 후 시그널을 발생시킵니다.
-        """
-        try:
-            current_price = abs(int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", stock_code, 10).strip())) # 현재가
-            daily_change = int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", stock_code, 11).strip()) # 전일대비
-            daily_change_pct = float(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", stock_code, 12).strip()) # 등락률
-            accumulated_volume = int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", stock_code, 13).strip()) # 누적거래량
-            open_price = abs(int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", stock_code, 16).strip())) # 시가
-            high_price = abs(int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", stock_code, 17).strip())) # 고가
-            low_price = abs(int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", stock_code, 18).strip())) # 저가
-            chegyul_gangdo = float(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", stock_code, 229).strip()) # 체결강도
-            total_buy_cvol = int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", stock_code, 272).strip()) # 매수총잔량
-            total_sell_cvol = int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", stock_code, 273).strip()) # 매도총잔량
-            accumulated_trading_value = int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", stock_code, 30).strip()) # 누적거래대금 (단위: 원)
-
-            self.real_time_data[stock_code] = {
-                "current_price": current_price,
-                "daily_change": daily_change,
-                "current_daily_change_pct": daily_change_pct, # 등락률
-                "volume": accumulated_volume, # 누적거래량
-                "open_price": open_price,
-                "high_price": high_price,
-                "low_price": low_price,
-                "chegyul_gangdo": chegyul_gangdo,
-                "total_buy_cvol": total_buy_cvol,
-                "total_sell_cvol": total_sell_cvol,
-                "trading_value": accumulated_trading_value, # 누적거래대금
-                "timestamp": get_current_time_str()
-            }
-            
-            # 실시간 데이터 업데이트를 외부 모듈에 알리기 위해 시그널 발생
-            self.real_time_signal.emit({
-                "stock_code": stock_code,
-                "real_type": real_type,
-                "data": self.real_time_data[stock_code]
-            })
-            logger.debug(f"Real-time data received and stored: {stock_code}, Current Price: {current_price}")
-        except Exception as e:
-            logger.error(f"Error parsing real-time data for {stock_code}: {e}", exc_info=True)
-
-
-    def _on_receive_msg(self, screen_no, rq_name, tr_code, msg):
-        """
-        키움 API 메시지 수신 이벤트 핸들러.
-        """
-        logger.info(f"📩 Message received: Screen No. {screen_no}, Request Name: {rq_name}, TR Code: {tr_code}, Message: {msg}")
-
-    def _on_receive_chejan_data(self, gubun, item_cnt, fid_list):
-        """
-        체결/잔고 데이터 수신 이벤트 핸들러.
-        이 부분은 TradeManager 또는 MonitorPositions에서 처리될 수 있습니다.
-        """
-        logger.info(f"📋 Conclusion/Balance data received: Division={gubun}, Item Count={item_cnt}, FID List={fid_list}")
-
-    def _on_receive_real_condition(self, stock_code, event_type, condition_name, condition_index):
-        """
-        실시간 조건검색 이벤트 수신 핸들러.
+        시장별 종목 코드를 반환합니다.
         Args:
-            stock_code (str): 종목코드
-            event_type (str): "I" (편입), "D" (이탈)
-            condition_name (str): 조건식 이름
-            condition_index (str): 조건식 인덱스
-        """
-        stock_name = self.get_stock_name(stock_code) # 캐시된 종목명 사용
-        event_msg = "편입" if event_type == "I" else "이탈"
-        logger.info(f"📡 [Real-time Condition Event] {stock_name}({stock_code}) - {condition_name} ({condition_index}) {event_msg}")
-        
-        # RealTimeConditionManager로 이 이벤트를 전달하기 위해 시그널 발생
-        self.real_condition_signal.emit(stock_code, event_type, condition_name, condition_index)
-
-    def request_tr_data(self, tr_code, rq_name, input_values, prev_next, screen_no, timeout_ms=10000):
-        """
-        TR 요청을 보내고 응답을 기다리는 함수.
-        Args:
-            tr_code (str): TR 코드 (예: "opt10081")
-            rq_name (str): 요청 이름
-            input_values (dict): SetInputValue에 설정할 키-값 쌍
-            prev_next (int): 연속 조회 (0: 처음, 2: 다음)
-            screen_no (str): 화면번호
-            timeout_ms (int): 타임아웃 (밀리초)
+            market (str): 시장 구분 코드 ("0": 코스피, "10": 코스닥, "3": ELW, "4": 뮤추얼펀드, "8": ETF, "9": REITs, "12": ETN)
         Returns:
-            Any: TR 응답 데이터 (DataFrame 또는 dict)
+            list: 종목 코드 리스트
         """
-        self.tr_data = None
-        self.tr_event_loop = QEventLoop()
-
-        for key, value in input_values.items():
-            self.kiwoom.dynamicCall("SetInputValue(QString, QString)", key, str(value))
-        
-        ret = self.kiwoom.dynamicCall("CommRqData(QString, QString, int, QString)",
-                                      rq_name, tr_code, prev_next, screen_no)
-
-        if ret != 0:
-            error_msg = get_error_message(ret)
-            logger.error(f"CommRqData call failed: {tr_code} - {error_msg}")
-            return {"error": f"CommRqData failed: {error_msg}"}
-
-        timer = QTimer()
-        timer.setSingleShot(True)
-        timer.timeout.connect(self.tr_event_loop.quit)
-        timer.start(timeout_ms)
-        self.tr_event_loop.exec_()
-
-        if not timer.isActive() and self.tr_data is None:
-            logger.error(f"TR response timeout or no data: {tr_code} - {rq_name}")
-            return {"error": "TR request timeout or no data"}
-        
-        return self.tr_data
-
-    def get_code_list_by_market(self, market):
-        """시장별 종목코드 목록을 반환합니다."""
         codes = self.kiwoom.dynamicCall("GetCodeListByMarket(QString)", market)
         return codes.split(';') if codes else []
 
-    def get_stock_name(self, code):
+    def get_stock_name(self, code: str) -> str:
         """
-        주어진 종목코드에 대한 종목명을 반환합니다.
-        캐시를 사용하여 중복 API 호출을 방지합니다.
+        종목 코드를 통해 종목명을 반환합니다. 캐시를 사용합니다.
         """
         if code in self._stock_name_cache:
             return self._stock_name_cache[code]
-
         name = self.kiwoom.dynamicCall("GetMasterCodeName(QString)", code).strip()
-        if name:
-            self._stock_name_cache[code] = name
-            return name
-        return "Unknown"
+        if not name:
+            logger.warning(f"종목명 조회 실패: {code}")
+            return "Unknown"
+        self._stock_name_cache[code] = name
+        return name
 
-    def get_master_stock_state(self, code):
+    def get_stock_state(self, code: str) -> str:
         """
-        주어진 종목코드에 대한 종목 상태(예: '관리종목', '투자경고')를 반환합니다.
+        종목 상태 정보를 반환합니다.
+        예: "정상", "관리종목", "거래정지" 등
         """
-        try:
-            state_info = self.kiwoom.dynamicCall("GetMasterStockState(QString)", code)
-            return state_info.strip() if state_info else ""
-        except Exception as e:
-            logger.warning(f"GetMasterStockState call failed ({code}): {e}. Returning empty string.", exc_info=True)
-            return ""
-
-    def SetRealReg(self, screen_no, code_list, fid_list, real_type):
-        """실시간 데이터를 등록합니다."""
-        codes_str = ";".join(code_list) if isinstance(code_list, list) else code_list
-        fids_str = ";".join(map(str, fid_list)) if isinstance(fid_list, list) else fid_list
-        
-        self.kiwoom.dynamicCall("SetRealReg(QString, QString, QString, QString)",
-                                screen_no, codes_str, fids_str, real_type)
-        logger.info(f"Real-time registration request: Screen No. {screen_no}, Stocks {codes_str}, FIDs {fids_str}, Type {real_type}")
-
-    def SetRealRemove(self, screen_no, codes):
-        """실시간 데이터를 해제합니다."""
-        self.kiwoom.dynamicCall("SetRealRemove(QString, QString)", screen_no, codes)
-        logger.info(f"Real-time unregistration request: Screen No. {screen_no}, Stocks {codes}")
+        return self.kiwoom.dynamicCall("GetMasterStockState(QString)", code).strip()
 
     def generate_real_time_screen_no(self):
-        """
-        고유한 실시간 화면번호를 생성하여 반환합니다.
-        REALTIME_SCREEN_NO_PREFIX (5000번대) 내에서 순환하며 사용합니다.
-        """
-        # 5000 ~ 5099 범위 내에서 순환
-        min_screen_no = int(REALTIME_SCREEN_NO_PREFIX + "00")
-        max_screen_no = int(REALTIME_SCREEN_NO_PREFIX + "99")
+        """실시간 데이터 등록을 위한 고유 화면 번호를 생성합니다."""
+        # 3000번대 화면번호 사용 (임의 지정)
+        # 실제 운영에서는 더 체계적인 화면번호 관리가 필요할 수 있음
+        return "3000"
 
-        self._real_time_screen_no_counter += 1
-        if self._real_time_screen_no_counter > max_screen_no:
-            self._real_time_screen_no_counter = min_screen_no
-        
-        return str(self._real_time_screen_no_counter)
+    def generate_condition_screen_no(self):
+        """조건 검색 실시간 등록을 위한 고유 화면 번호를 생성합니다."""
+        return "5000" # 조건 검색 전용 화면번호
 
-    def get_condition_name_list(self):
+    def SetRealReg(self, screen_no: str, code_list: str, fid_list: str, real_type: str):
         """
-        사용자 저장 조건식 목록을 반환합니다.
+        실시간 데이터 등록/해제 요청을 보냅니다.
+        Args:
+            screen_no (str): 화면 번호
+            code_list (str): 종목 코드 목록 (세미콜론으로 구분)
+            fid_list (str): FID 목록 (세미콜론으로 구분)
+            real_type (str): "0" (등록), "1" (해제)
+        """
+        self.kiwoom.dynamicCall("SetRealReg(QString, QString, QString, QString)",
+                                 screen_no, code_list, fid_list, real_type)
+        logger.info(f"SetRealReg 호출: 화면번호 {screen_no}, 종목 {code_list}, FID {fid_list}, 타입 {real_type}")
+
+    def SetRealRemove(self, screen_no: str, codes: str):
+        """
+        등록된 실시간 데이터를 해제합니다.
+        Args:
+            screen_no (str): 화면 번호 ("ALL" 가능)
+            codes (str): 종목 코드 (세미콜론으로 구분, "ALL" 가능)
+        """
+        self.kiwoom.dynamicCall("SetRealRemove(QString, QString)", screen_no, codes)
+        logger.info(f"SetRealRemove 호출: 화면번호 {screen_no}, 종목 {codes}")
+
+    def _on_receive_real_data(self, code: str, real_type: str, real_data: str):
+        """
+        실시간 데이터 수신 시 호출됩니다.
+        """
+        # FID 10: 현재가, 13: 누적거래량, 228: 체결강도, 290: 매수체결량, 291: 매도체결량
+        current_price = abs(int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", code, 10)))
+        total_volume = abs(int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", code, 13)))
+        chegyul_gangdo = float(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", code, 228))
+        total_buy_cvol = abs(int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", code, 290)))
+        total_sell_cvol = abs(int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", code, 291)))
+
+        # self.real_time_data 딕셔너리 업데이트
+        if code not in self.real_time_data:
+            self.real_time_data[code] = {}
+
+        self.real_time_data[code].update({
+            'current_price': current_price,
+            'total_volume': total_volume,
+            'chegyul_gangdo': chegyul_gangdo,
+            'total_buy_cvol': total_buy_cvol,
+            'total_sell_cvol': total_sell_cvol,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+        # logger.debug(f"실시간 데이터 수신: {code}, 현재가: {current_price}, 체결강도: {chegyul_gangdo}")
+
+        # 외부로 실시간 데이터 시그널 전송
+        self.real_time_signal.emit({
+            'code': code,
+            'current_price': current_price,
+            'chegyul_gangdo': chegyul_gangdo,
+            'total_buy_cvol': total_buy_cvol,
+            'total_sell_cvol': total_sell_cvol
+        })
+
+
+    def _on_receive_tr_data(self, screen_no, rq_name, tr_code, record_name, prev_next, data_len, error_code, message, splm_msg):
+        """
+        TR 요청 결과 수신 시 호출됩니다.
+        """
+        logger.info(f"TR 데이터 수신: {rq_name}, {tr_code}, prev_next: {prev_next}")
+        data = {}
+        try:
+            if rq_name == "opt10081_req": # 일봉 데이터 요청
+                cnt = self.kiwoom.dynamicCall("GetRepeatCnt(QString, QString)", tr_code, rq_name)
+                rows = []
+                for i in range(cnt):
+                    row = {
+                        "날짜": self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "일자").strip(),
+                        "현재가": abs(int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "현재가"))),
+                        "거래량": abs(int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "거래량"))),
+                        "시가": abs(int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "시가"))),
+                        "고가": abs(int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "고가"))),
+                        "저가": abs(int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "저가"))),
+                    }
+                    rows.append(row)
+                data = {"data": rows, "prev_next": prev_next}
+            elif rq_name == "opw00001_req": # 예수금 요청
+                data["예수금"] = int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, 0, "예수금").strip())
+                data["출금가능금액"] = int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, 0, "출금가능금액").strip())
+                data["주문가능금액"] = int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, 0, "주문가능금액").strip())
+            elif rq_name == "opw00018_req": # 계좌평가잔고내역 요청
+                account_balance = {}
+                account_balance["총평가금액"] = int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, 0, "총평가금액").strip())
+                account_balance["총손익금액"] = int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, 0, "총손익금액").strip())
+                account_balance["총수익률"] = float(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, 0, "총수익률").strip())
+
+                cnt = self.kiwoom.dynamicCall("GetRepeatCnt(QString, QString)", tr_code, rq_name)
+                positions = []
+                for i in range(cnt):
+                    item = {
+                        "종목코드": self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "종목번호").strip().replace('A', ''),
+                        "종목명": self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "종목명").strip(),
+                        "보유수량": int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "보유수량").strip()),
+                        "매입가": int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "매입가").strip()),
+                        "현재가": int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "현재가").strip()),
+                        "평가손익": int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "평가손익").strip()),
+                        "수익률": float(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "수익률").strip()),
+                    }
+                    positions.append(item)
+                data["account_balance"] = account_balance
+                data["positions"] = positions
+            else:
+                logger.warning(f"처리되지 않은 TR 요청: {rq_name}")
+
+        except Exception as e:
+            logger.error(f"TR 데이터 처리 중 오류 발생 ({rq_name}, {tr_code}): {e}", exc_info=True)
+            data["error"] = str(e)
+
+        self.tr_event_loop.set_data(data)
+        self.tr_data_signal.emit(screen_no, rq_name, tr_code, data) # TR 데이터 시그널 전송
+
+    def request_daily_ohlcv(self, stock_code: str, end_date: str, prev_next: str = "0") -> dict:
+        """
+        주어진 종목의 일봉 데이터를 요청합니다 (TR: opt10081).
+        Args:
+            stock_code (str): 종목 코드
+            end_date (str): 조회 종료일 (YYYYMMDD)
+            prev_next (str): "0": 처음 조회, "2": 다음 페이지 조회
         Returns:
-            dict: {조건식 이름: 조건식 인덱스}
+            dict: 일봉 데이터 (DataFrame 형태) 및 prev_next 정보
+        """
+        self.current_tr_code = "opt10081"
+        self.tr_event_loop.reset() # TR 요청 전에 루프 초기화
+
+        self.kiwoom.dynamicCall("SetInputValue(QString, QString)", "종목코드", stock_code)
+        self.kiwoom.dynamicCall("SetInputValue(QString, QString)", "기준일자", end_date)
+        self.kiwoom.dynamicCall("SetInputValue(QString, QString)", "수정주가구분", "1") # 1: 수정주가 반영
+
+        screen_no = "1000" # TR 요청용 화면번호 (임의 지정)
+        ret = self.kiwoom.dynamicCall("CommRqData(QString, QString, int, QString)",
+                                       "opt10081_req", "opt10081", int(prev_next), screen_no)
+
+        if ret == 0:
+            logger.info(f"일봉 데이터 요청 성공: {stock_code}, 기준일: {end_date}")
+            if self.tr_event_loop.wait(timeout_ms=10000): # 응답 대기
+                return self.tr_event_loop.get_data()
+            else:
+                logger.warning(f"일봉 데이터 요청 타임아웃: {stock_code}")
+                return {"error": "Timeout"}
+        else:
+            error_msg = get_error_message(ret)
+            logger.error(f"일봉 데이터 요청 실패: {stock_code}, 오류: {error_msg}")
+            return {"error": error_msg}
+
+    def get_condition_list(self) -> dict:
+        """
+        키움 증권에 저장된 조건식 목록을 가져옵니다.
         """
         raw_str = self.kiwoom.dynamicCall("GetConditionNameList()")
         condition_map = {}
-        if raw_str:
-            for cond in raw_str.split(';'):
-                if not cond.strip():
-                    continue
-                try:
-                    index, name = cond.split('^')
-                    condition_map[name.strip()] = int(index.strip())
-                except ValueError:
-                    logger.warning(f"Malformed condition string: {cond}")
-                    continue
+        for cond in raw_str.split(';'):
+            if not cond.strip():
+                continue
+            index, name = cond.split('^')
+            condition_map[name.strip()] = int(index.strip())
         self.condition_list = condition_map
-        logger.info(f"📑 Loaded condition list: {list(condition_map.keys())}")
+        logger.info(f"📑 조건검색식 목록 로드: {list(condition_map.keys())}")
         return condition_map
 
-    def SendCondition(self, screen_no, condition_name, index, search_type):
+    def SendCondition(self, screen_no: str, condition_name: str, index: int, search_type: int):
         """
-        조건검색을 실행합니다.
+        조건 검색을 실행하거나 해제합니다.
         Args:
-            screen_no (str): 화면번호
+            screen_no (str): 화면 번호
             condition_name (str): 조건식 이름
             index (int): 조건식 인덱스
-            search_type (int): 0: 일반조회, 1: 실시간조회
-        Returns:
-            int: 1 성공, 0 실패
+            search_type (int): 0: 실시간 등록, 1: 실시간 해제
         """
-        logger.info(f"🧠 Sending condition: {condition_name} (Index: {index}, Real-time: {search_type})")
+        logger.info(f"🧠 조건검색 실행/해제: {condition_name} (Index: {index}, 타입: {'등록' if search_type == 0 else '해제'})")
         ret = self.kiwoom.dynamicCall("SendCondition(QString, QString, int, int)",
-                                      screen_no, condition_name, index, search_type)
+                                       screen_no, condition_name, index, search_type)
         if ret == 1:
-            logger.info(f"✅ Condition '{condition_name}' sent successfully.")
+            logger.info(f"✅ 조건검색 요청 성공: {condition_name}")
+            return True
         else:
-            logger.error(f"❌ Failed to send condition '{condition_name}'. Return code: {ret}")
-        return ret
-    
-    def GetCommRealData(self, code, fid):
+            error_msg = get_error_message(ret)
+            logger.error(f"❌ 조건검색 요청 실패: {condition_name}, 오류: {error_msg}")
+            return False
+
+    def _on_receive_real_condition(self, code, event_type, condition_name, condition_index):
         """
-        특정 FID에 대한 실시간 데이터를 가져옵니다.
-        이것은 기본 QAxWidget 메서드에 대한 래퍼입니다.
+        실시간 조건 검색 종목 편입/이탈 이벤트 수신 시 호출됩니다.
         """
-        return self.kiwoom.dynamicCall("GetCommRealData(QString, int)", code, fid)
+        stock_name = self.get_stock_name(code)
+        event_msg = "편입" if event_type == "I" else "이탈" # I: 편입, D: 이탈
+        logger.info(f"📡 [조건검색 이벤트] {condition_name} ({condition_index}) - {stock_name}({code}) {event_msg}")
+
+        # 조건 검색 통과 종목 목록 업데이트 (여기서는 간단히 로그만 남김)
+        # 실제 전략에서는 이 이벤트를 활용하여 매수/매도 로직을 트리거할 수 있음.
+        # 예를 들어, self.filtered_df를 업데이트하거나, buy_strategy에 시그널을 보낼 수 있습니다.
+        if event_type == "I": # 편입 시
+            # 여기에 매수 전략을 트리거하는 로직을 추가할 수 있습니다.
+            pass
+        elif event_type == "D": # 이탈 시
+            # 여기에 매도 전략을 트리거하는 로직을 추가할 수 있습니다.
+            pass
+
+    def get_current_price(self, stock_code: str) -> int:
+        """
+        실시간 데이터에서 현재가를 가져옵니다.
+        """
+        return self.real_time_data.get(stock_code, {}).get('current_price', 0)
 
