@@ -134,18 +134,26 @@ class KiwoomQueryHelper(QObject): # QObject 상속
         self.kiwoom.dynamicCall("SetRealRemove(QString, QString)", screen_no, codes)
         logger.info(f"SetRealRemove 호출: 화면번호 {screen_no}, 종목 {codes}")
 
-    def _on_receive_real_data(self, code: str, real_type: str, real_data: str):
-        """
-        실시간 데이터 수신 시 호출됩니다.
-        """
-        # FID 10: 현재가, 13: 누적거래량, 228: 체결강도, 290: 매수체결량, 291: 매도체결량
-        current_price = abs(int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", code, 10)))
-        total_volume = abs(int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", code, 13)))
-        chegyul_gangdo = float(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", code, 228))
-        total_buy_cvol = abs(int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", code, 290)))
-        total_sell_cvol = abs(int(self.kiwoom.dynamicCall("GetCommRealData(QString, int)", code, 291)))
+# 중략 ...
 
-        # self.real_time_data 딕셔너리 업데이트
+    def _safe_get_real_data(self, code: str, fid: int, default=0, as_float=False):
+        """빈 문자열 예외 방지를 위한 안전한 GetCommRealData 래퍼"""
+        raw = self.kiwoom.dynamicCall("GetCommRealData(QString, int)", code, fid)
+        if not raw.strip():
+            return default
+        try:
+            return float(raw.strip()) if as_float else abs(int(raw.strip()))
+        except ValueError:
+            logger.warning(f"GetCommRealData 변환 실패: 코드={code}, FID={fid}, 값={raw}")
+            return default
+
+    def _on_receive_real_data(self, code: str, real_type: str, real_data: str):
+        current_price = self._safe_get_real_data(code, 10)
+        total_volume = self._safe_get_real_data(code, 13)
+        chegyul_gangdo = self._safe_get_real_data(code, 228, as_float=True)
+        total_buy_cvol = self._safe_get_real_data(code, 290)
+        total_sell_cvol = self._safe_get_real_data(code, 291)
+
         if code not in self.real_time_data:
             self.real_time_data[code] = {}
 
@@ -156,6 +164,14 @@ class KiwoomQueryHelper(QObject): # QObject 상속
             'total_buy_cvol': total_buy_cvol,
             'total_sell_cvol': total_sell_cvol,
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+
+        self.real_time_signal.emit({
+            'code': code,
+            'current_price': current_price,
+            'chegyul_gangdo': chegyul_gangdo,
+            'total_buy_cvol': total_buy_cvol,
+            'total_sell_cvol': total_sell_cvol
         })
         # logger.debug(f"실시간 데이터 수신: {code}, 현재가: {current_price}, 체결강도: {chegyul_gangdo}")
 

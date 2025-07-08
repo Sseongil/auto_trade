@@ -42,6 +42,14 @@
             background-color: #4b5563; /* gray-600 */
             transform: translateY(-1px);
         }
+        .btn-danger {
+            background-color: #ef4444; /* red-500 */
+            color: #ffffff;
+        }
+        .btn-danger:hover {
+            background-color: #dc2626; /* red-600 */
+            transform: translateY(-1px);
+        }
         .toggle-switch {
             position: relative;
             display: inline-block;
@@ -148,6 +156,7 @@
                 <div><strong>보유 종목 수:</strong> <span id="positionCount">로딩 중...</span></div>
                 <div><strong>Kiwoom 연결:</strong> <span id="kiwoomConnected" class="font-bold">로딩 중...</span></div>
                 <div><strong>마지막 업데이트:</strong> <span id="lastUpdate">로딩 중...</span></div>
+                <div><strong>ngrok URL:</strong> <span id="ngrokUrl">로딩 중...</span></div>
             </div>
         </div>
 
@@ -187,6 +196,7 @@
                 <button id="setConditionBtn" class="btn btn-primary">조건식 등록</button>
                 <button id="removeConditionBtn" class="btn btn-secondary">조건식 해제</button>
             </div>
+            <p class="text-sm text-gray-500 mt-2">현재 등록된 조건식: <span id="currentConditionName" class="font-semibold">없음</span></p>
         </div>
 
         <!-- 보유 포지션 카드 -->
@@ -226,6 +236,7 @@
                             <th>유형</th>
                             <th>수량</th>
                             <th>가격</th>
+                            <th>주문번호</th>
                             <th>결과</th>
                             <th>메시지</th>
                         </tr>
@@ -236,11 +247,15 @@
                 </table>
             </div>
             <p id="noTradeHistory" class="text-gray-500 text-center mt-4 hidden">거래 내역이 없습니다.</p>
+            <div class="flex justify-end mt-4">
+                <button id="clearTradeHistoryBtn" class="btn btn-danger">거래 내역 삭제</button>
+            </div>
         </div>
     </div>
 
     <script>
-        const API_KEY = "YOUR_API_KEY_HERE"; // 실제 API 키로 교체하세요! (환경 변수에서 가져오거나 안전하게 관리)
+        // Flask 템플릿으로부터 API_KEY를 안전하게 전달받음
+        const API_KEY = "{{ api_key }}"; 
         const API_BASE_URL = window.location.origin; // 현재 서버의 URL 사용
 
         function showMessage(message, type = 'success') {
@@ -260,7 +275,7 @@
                 });
                 const data = await response.json();
 
-                if (data.status === 'ok') {
+                if (data.status === 'ok' || data.status === 'initializing') {
                     document.getElementById('serverTime').textContent = data.server_time;
                     document.getElementById('accountNumber').textContent = data.account_number;
                     document.getElementById('balance').textContent = `${data.balance.toLocaleString()}원`;
@@ -269,11 +284,15 @@
                     document.getElementById('kiwoomConnected').textContent = data.kiwoom_connected ? '✅ 연결됨' : '❌ 연결 끊김';
                     document.getElementById('kiwoomConnected').className = data.kiwoom_connected ? 'font-bold text-green-600' : 'font-bold text-red-600';
                     document.getElementById('lastUpdate').textContent = data.last_kiwoom_update;
+                    document.getElementById('ngrokUrl').textContent = data.ngrok_url;
+
 
                     // 전략 토글 상태 업데이트
                     document.getElementById('toggleConditionCheck').checked = data.condition_check_enabled;
                     document.getElementById('toggleBuyStrategy').checked = data.buy_strategy_enabled;
                     document.getElementById('toggleExitStrategy').checked = data.exit_strategy_enabled;
+                    document.getElementById('currentConditionName').textContent = data.real_condition_name || '없음';
+
 
                     updatePositionsTable(data.positions);
                 } else {
@@ -288,6 +307,7 @@
         async function fetchTradeHistory() {
             try {
                 const response = await fetch(`${API_BASE_URL}/trade_history`, {
+                    method: 'GET', // Explicitly set GET
                     headers: { 'X-API-Key': API_KEY }
                 });
                 const data = await response.json();
@@ -361,7 +381,8 @@
                 row.insertCell().textContent = trade.trade_type || 'N/A';
                 row.insertCell().textContent = trade.quantity ? trade.quantity.toLocaleString() : '0';
                 row.insertCell().textContent = trade.price ? trade.price.toLocaleString() + '원' : 'N/A';
-                row.insertCell().textContent = trade.result || 'N/A';
+                row.insertCell().textContent = trade.order_no || 'N/A'; // order_no 필드 추가
+                row.insertCell().textContent = trade.result || 'N/A'; 
                 row.insertCell().textContent = trade.message || 'N/A';
             });
         }
@@ -414,6 +435,33 @@
             }
         }
 
+        async function clearTradeHistory() {
+            if (!confirm('정말로 모든 거래 내역을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/trade_history/clear`, {
+                    method: 'POST',
+                    headers: {
+                        'X-API-Key': API_KEY
+                    }
+                });
+                const data = await response.json();
+                if (data.status === 'success') {
+                    showMessage(data.message);
+                } else {
+                    showMessage(`거래 내역 삭제 실패: ${data.message}`, 'error');
+                }
+            } catch (error) {
+                console.error('Error clearing trade history:', error);
+                showMessage(`거래 내역 삭제 중 오류 발생: ${error.message}`, 'error');
+            } finally {
+                fetchTradeHistory(); // 거래 내역 새로고침
+                fetchStatus(); // 상태도 새로고침 (보유 종목 수 등)
+            }
+        }
+
         // 이벤트 리스너 등록
         document.getElementById('toggleConditionCheck').addEventListener('change', (e) => {
             toggleStrategy('condition_check_enabled', e.target.checked);
@@ -442,6 +490,9 @@
                 showMessage('조건식 이름을 입력해주세요.', 'error');
             }
         });
+
+        document.getElementById('clearTradeHistoryBtn').addEventListener('click', clearTradeHistory);
+
 
         // 초기 로드 및 주기적 업데이트
         document.addEventListener('DOMContentLoaded', () => {

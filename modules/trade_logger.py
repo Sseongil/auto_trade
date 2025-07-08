@@ -4,87 +4,103 @@ import os
 import csv
 import logging
 from datetime import datetime
+import threading
 
+# 로깅 설정
 logger = logging.getLogger(__name__)
 
-# 거래 로그 파일 경로 (프로젝트 루트에 'logs' 디렉토리 생성)
-LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs')
-TRADE_LOG_FILE = os.path.join(LOG_DIR, 'trade_log.csv')
-
-# 로그 디렉토리 생성
-os.makedirs(LOG_DIR, exist_ok=True)
+# 로그 파일 경로
+LOG_DIR = "logs"
+TRADE_LOG_FILE = os.path.join(LOG_DIR, "trade_log.csv")
 
 class TradeLogger:
     def __init__(self):
-        """
-        TradeLogger 클래스 초기화.
-        로그 파일이 없으면 헤더를 추가합니다.
-        """
-        self._ensure_header()
+        # 로그 디렉토리 생성 (없으면)
+        os.makedirs(LOG_DIR, exist_ok=True)
+        self.lock = threading.Lock() # 파일 접근 시 동시성 문제 방지를 위한 락
 
-    def _ensure_header(self):
-        """거래 로그 파일이 없으면 헤더를 추가합니다."""
+        # 파일이 없거나 비어있으면 헤더를 작성
         if not os.path.exists(TRADE_LOG_FILE) or os.stat(TRADE_LOG_FILE).st_size == 0:
-            with open(TRADE_LOG_FILE, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.writer(f)
-                writer.writerow(['timestamp', 'stock_code', 'stock_name', 'trade_type', 'quantity', 'price', 'order_no', 'message'])
-            logger.info(f"거래 로그 파일 헤더 생성: {TRADE_LOG_FILE}")
+            with self.lock:
+                with open(TRADE_LOG_FILE, 'w', newline='', encoding='utf-8-sig') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        "timestamp", "stock_code", "stock_name", "trade_type",
+                        "quantity", "price", "order_no", "result", "message"
+                    ])
+            logger.info(f"✅ 거래 로그 파일 '{TRADE_LOG_FILE}'이(가) 생성되었습니다. (헤더 포함)")
+        else:
+            logger.info(f"✅ 기존 거래 로그 파일 '{TRADE_LOG_FILE}'을(를) 사용합니다.")
 
-    def log_trade(self, stock_code: str, stock_name: str, trade_type: str, quantity: int, price: float, order_no: str = None, message: str = ""):
+    def log_trade(self, stock_code, stock_name, trade_type, quantity, price, order_no, result, message):
         """
-        거래 내역을 로그 파일에 기록합니다.
-
-        Args:
-            stock_code (str): 종목 코드
-            stock_name (str): 종목명
-            trade_type (str): 거래 유형 (예: 'BUY_ORDER_REQUEST', 'BUY_FILLED', 'SELL_ORDER_REQUEST', 'SELL_FILLED', 'MANUAL_NOTE')
-            quantity (int): 수량
-            price (float): 가격
-            order_no (str, optional): 주문 번호. Defaults to None.
-            message (str, optional): 추가 메시지. Defaults to "".
+        거래 내역을 CSV 파일에 기록합니다.
+        :param stock_code: 종목 코드
+        :param stock_name: 종목명
+        :param trade_type: 거래 유형 (예: "매수", "매도")
+        :param quantity: 수량
+        :param price: 가격
+        :param order_no: 주문 번호
+        :param result: 거래 결과 (예: "성공", "실패", "부분체결")
+        :param message: 상세 메시지
         """
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            with open(TRADE_LOG_FILE, 'a', newline='', encoding='utf-8-sig') as f:
-                writer = csv.writer(f)
-                writer.writerow([timestamp, stock_code, stock_name, trade_type, quantity, price, order_no, message])
-            logger.info(f"거래 로그 기록: [{trade_type}] {stock_name}({stock_code}) {quantity}주 @ {price}원 (주문번호: {order_no if order_no else 'N/A'})")
-        except Exception as e:
-            logger.error(f"거래 로그 기록 중 오류 발생: {e}", exc_info=True)
+        log_entry = [timestamp, stock_code, stock_name, trade_type, quantity, price, order_no, result, message]
 
-    def get_trade_log(self, stock_code: str = None):
+        with self.lock:
+            try:
+                with open(TRADE_LOG_FILE, 'a', newline='', encoding='utf-8-sig') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(log_entry)
+                logger.debug(f"거래 로그 기록: {log_entry}")
+            except Exception as e:
+                logger.error(f"❌ 거래 로그 파일 쓰기 실패: {e}", exc_info=True)
+
+    def get_trade_log(self):
         """
-        저장된 모든 거래 로그를 읽어와 리스트 형태로 반환합니다.
-        stock_code가 제공되면 해당 종목의 로그만 필터링하여 반환합니다.
+        CSV 파일에서 모든 거래 로그를 읽어 리스트 형태로 반환합니다.
         """
         logs = []
-        if not os.path.exists(TRADE_LOG_FILE):
-            return logs
-
-        try:
-            with open(TRADE_LOG_FILE, 'r', encoding='utf-8-sig') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    if stock_code is None or row.get('stock_code') == stock_code:
+        with self.lock:
+            if not os.path.exists(TRADE_LOG_FILE) or os.stat(TRADE_LOG_FILE).st_size == 0:
+                logger.info(f"ℹ️ 거래 로그 파일 '{TRADE_LOG_FILE}'이(가) 없거나 비어 있습니다.")
+                return []
+            
+            try:
+                with open(TRADE_LOG_FILE, 'r', newline='', encoding='utf-8-sig') as f:
+                    reader = csv.DictReader(f)
+                    # DictReader는 첫 줄을 헤더로 자동 인식합니다.
+                    # 헤더가 없거나 잘못된 경우 여기서 오류가 발생할 수 있으므로,
+                    # 파일 초기화 시 헤더를 강제 작성하여 문제를 방지합니다.
+                    for row in reader:
                         logs.append(row)
-        except Exception as e:
-            logger.error(f"거래 로그 읽기 중 오류 발생: {e}", exc_info=True)
+                logger.debug(f"거래 로그 {len(logs)}개 로드 완료.")
+            except Exception as e:
+                logger.error(f"❌ 거래 로그 파일 읽기 실패: {e}", exc_info=True)
+                # 파일이 손상되었을 가능성이 있으므로 빈 리스트 반환
+                return []
         return logs
 
     def clear_trade_log(self):
         """
-        모든 거래 로그를 삭제합니다. (주의: 되돌릴 수 없는 작업입니다)
+        모든 거래 로그를 삭제합니다. (파일 내용 비우기)
         """
-        try:
+        with self.lock:
             if os.path.exists(TRADE_LOG_FILE):
-                os.remove(TRADE_LOG_FILE)
-                self._ensure_header() # 헤더 다시 생성
-                logger.warning(f"모든 거래 로그가 삭제되었습니다: {TRADE_LOG_FILE}")
-                return True
+                try:
+                    with open(TRADE_LOG_FILE, 'w', newline='', encoding='utf-8-sig') as f:
+                        # 헤더만 다시 작성하여 파일 내용을 비움
+                        writer = csv.writer(f)
+                        writer.writerow([
+                            "timestamp", "stock_code", "stock_name", "trade_type",
+                            "quantity", "price", "order_no", "result", "message"
+                        ])
+                    logger.info(f"🗑️ 거래 로그 파일 '{TRADE_LOG_FILE}'의 내용이 삭제되었습니다.")
+                    return True
+                except Exception as e:
+                    logger.error(f"❌ 거래 로그 파일 삭제 실패: {e}", exc_info=True)
+                    return False
             else:
-                logger.info("삭제할 거래 로그 파일이 없습니다.")
+                logger.info(f"ℹ️ 삭제할 거래 로그 파일 '{TRADE_LOG_FILE}'이(가) 존재하지 않습니다.")
                 return False
-        except Exception as e:
-            logger.error(f"거래 로그 삭제 중 오류 발생: {e}", exc_info=True)
-            return False
 

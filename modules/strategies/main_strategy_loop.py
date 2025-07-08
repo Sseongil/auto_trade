@@ -4,11 +4,11 @@ import logging
 import time as time_module
 from datetime import datetime, time
 
-from modules.strategies.check_conditions_runner import get_candidate_stocks_from_condition
-from modules.strategies.buy_strategy import execute_buy_strategy
-from modules.strategies.exit_strategy import execute_exit_strategy
-from modules.common.config import REALTIME_FID_LIST
-from modules.notify import send_telegram_message
+from common.config import REALTIME_FID_LIST
+from notify import send_telegram_message
+from strategies.check_conditions_runner import get_candidate_stocks_from_condition
+from strategies.buy_strategy import execute_buy_strategy
+from strategies.exit_strategy import execute_exit_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ strategy_flags = {
     "buy_strategy_enabled": False,
     "exit_strategy_enabled": False,
     "real_condition_name": None, # 현재 등록된 실시간 조건식 이름
-    "real_condition_index": None # 현재 등록된 실시간 조건식 인덱스
+    "real_condition_index": None # 현재 등록된 실시간 조건식 인덱스 (초기화 추가)
 }
 
 def set_strategy_flag(strategy_name: str, enabled: bool):
@@ -31,7 +31,7 @@ def set_strategy_flag(strategy_name: str, enabled: bool):
     else:
         logger.warning(f"⚠️ 알 수 없는 전략 이름: {strategy_name}")
 
-def set_real_condition_info(condition_name: str, condition_index: int):
+def set_real_condition_info(condition_name: str | None, condition_index: int | None):
     """
     현재 등록된 실시간 조건식 정보를 설정합니다.
     """
@@ -94,7 +94,7 @@ def run_daily_trading_cycle(kiwoom_helper, kiwoom_tr_request, monitor_positions,
     """
     now_time = datetime.now().time()
 
-    # 장 시작 전 (예: 8시 30분 ~ 9시) 또는 장 마감 후 (15시 30분 이후)
+    # 장 시작 전 (예: 8시 50분 ~ 9시) 또는 장 마감 후 (15시 30분 이후)
     if not (time(9, 0) <= now_time < time(15, 30)):
         logger.info("⏸️ 장 시간 외 대기 중...")
         # 장 마감 후에는 실시간 데이터 등록 해제
@@ -103,8 +103,8 @@ def run_daily_trading_cycle(kiwoom_helper, kiwoom_tr_request, monitor_positions,
             logger.info("✅ 장 마감. 모든 실시간 데이터 등록 해제.")
             # 조건 검색 실행 여부 초기화 (다음 날 재실행을 위해)
             kiwoom_helper.is_condition_checked = False
-            strategy_flags["real_condition_name"] = None
-            strategy_flags["real_condition_index"] = None
+            # 실시간 조건식 정보도 초기화
+            set_real_condition_info(None, None)
         return
 
     logger.info(f"🚀 메인 전략 루프 실행 중... (현재 시각: {now_time.strftime('%H:%M:%S')})")
