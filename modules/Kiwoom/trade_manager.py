@@ -40,6 +40,7 @@ class TradeManager:
         self.last_received_order_no = None # 가장 최근에 체결 통보된 주문번호
 
         # 키움 API 이벤트 연결
+        # KiwoomQueryHelper가 QAxWidget을 래핑하므로, ocx 대신 kiwoom_helper.kiwoom 사용
         self.kiwoom_helper.kiwoom.OnReceiveMsg.connect(self._on_receive_msg)
         self.kiwoom_helper.kiwoom.OnReceiveChejanData.connect(self._on_receive_chejan_data)
         
@@ -73,23 +74,23 @@ class TradeManager:
 
         # gubun '0': 접수/체결, '1': 잔고
         if gubun == "0": # 접수/체결 데이터
-            order_no = self.kiwoom_helper.ocx.GetChejanData(9203).strip() # 주문번호
-            stock_code = self.kiwoom_helper.ocx.GetChejanData(9001).strip() # 종목코드
+            order_no = self.kiwoom_helper.kiwoom.GetChejanData(9203).strip() # 주문번호
+            stock_code = self.kiwoom_helper.kiwoom.GetChejanData(9001).strip().replace('A', '') # 종목코드 (A 제거)
             stock_name = self.kiwoom_helper.get_stock_name(stock_code) # 종목명
-            order_type_str = self.kiwoom_helper.ocx.GetChejanData(912).strip() # 주문구분 (+매수, -매도)
-            order_quantity = int(self.kiwoom_helper.ocx.GetChejanData(900).strip()) # 주문수량 (원래 주문 수량)
-            executed_quantity = int(self.kiwoom_helper.ocx.GetChejanData(911).strip()) # 체결량
-            executed_price = float(self.kiwoom_helper.ocx.GetChejanData(910).strip()) # 체결가
-            current_quantity = int(self.kiwoom_helper.ocx.GetChejanData(930).strip()) # 현재 보유수량 (잔고)
+            order_type_str = self.kiwoom_helper.kiwoom.GetChejanData(912).strip() # 주문구분 (+매수, -매도)
+            order_quantity = int(self.kiwoom_helper.kiwoom.GetChejanData(900).strip()) # 주문수량 (원래 주문 수량)
+            executed_quantity = int(self.kiwoom_helper.kiwoom.GetChejanData(911).strip()) # 체결량
+            executed_price = float(self.kiwoom_helper.kiwoom.GetChejanData(910).strip()) # 체결가
+            current_quantity = int(self.kiwoom_helper.kiwoom.GetChejanData(930).strip()) # 현재 보유수량 (잔고)
             
             # 주문 상태 (접수, 체결, 확인 등)
-            order_status = self.kiwoom_helper.ocx.GetChejanData(919).strip() # 주문상태 (접수, 확인, 체결)
+            order_status = self.kiwoom_helper.kiwoom.GetChejanData(919).strip() # 주문상태 (접수, 확인, 체결)
 
             trade_type = ""
             if "+" in order_type_str:
-                trade_type = "BUY_FILLED"
+                trade_type = "매수"
             elif "-" in order_type_str:
-                trade_type = "SELL_FILLED"
+                trade_type = "매도"
             
             log_message = f"✅ 체결 정보: 주문번호={order_no}, 종목={stock_name}({stock_code}), 구분={order_type_str}, 체결량={executed_quantity}, 체결가={executed_price}, 현재보유={current_quantity}, 상태={order_status}"
             logger.info(log_message)
@@ -102,6 +103,7 @@ class TradeManager:
                 quantity=executed_quantity,
                 price=executed_price,
                 order_no=order_no,
+                result=order_status, # 체결 상태를 결과로 기록
                 message=f"체결 완료 (체결가: {executed_price}, 상태: {order_status})"
             )
             send_telegram_message(f"✅ 체결 완료: {stock_name}({stock_code}) {executed_quantity}주 @ {executed_price:,}원")
@@ -109,11 +111,11 @@ class TradeManager:
             # MonitorPositions 업데이트
             # 체결 완료 시점에만 포지션 업데이트
             if "체결" in order_status:
-                self.monitor_positions.update_position_from_chejan(
+                self.monitor_positions.update_position(
                     stock_code=stock_code,
                     new_quantity=current_quantity,
-                    purchase_price=executed_price, # 체결가로 매입가 업데이트 (단순화)
-                    buy_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S") # 현재 시간으로 업데이트
+                    new_purchase_price=executed_price, # 체결가로 매입가 업데이트 (단순화)
+                    new_buy_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S") # 현재 시간으로 업데이트
                 )
 
             # 주문 응답 이벤트 루프 종료 (place_order에서 대기 중인 경우)
@@ -171,6 +173,7 @@ class TradeManager:
             quantity=quantity,
             price=price,
             order_no=temp_order_id, # 임시 ID를 주문번호로 사용
+            result="요청", # 주문 요청 상태
             message=f"주문 요청 ({order_division_text})"
         )
 
@@ -180,7 +183,7 @@ class TradeManager:
                 self.order_event_loop.processEvents() # 이벤트 루프가 이미 실행 중인 경우를 대비
                 self.order_timer.start(30000) # 30초 타임아웃 설정
 
-                order_result_code = self.kiwoom_helper.ocx.SendOrder(
+                order_result_code = self.kiwoom_helper.kiwoom.SendOrder(
                     rq_name=f"{order_type_text}_req",
                     screen_no="0101", # 주문용 화면번호
                     account_no=self.account_number,

@@ -65,12 +65,15 @@ def execute_exit_strategy(kiwoom_helper, trade_manager, monitor_positions):
             conditions_met.append(("TAKE_PROFIT_1ST", pnl_pct))
 
         # 트레일링 스탑 (1차 익절 후 또는 전량 매도 시)
-        if pnl_pct >= 0.8: # 최소한 수익권에 있을 때만 트레일링 스탑 작동
-            if current_price > trail_high:
-                monitor_positions.update_position_trail_high(code, current_price) # trail_high 업데이트
-                logger.debug(f"[{stock_name}({code})] 트레일링 스탑 최고가 갱신: {current_price:,}원")
-            elif current_price <= trail_high * (1 - TRAIL_STOP_PCT_2ND / 100.0): # TRAIL_STOP_PCT_2ND는 % 값
-                conditions_met.append(("TRAIL_STOP", pnl_pct))
+        # 현재가 > trail_high 인 경우, trail_high 갱신
+        if current_price > trail_high:
+            monitor_positions.update_position_trail_high(code, current_price) # trail_high 업데이트
+            logger.debug(f"[{stock_name}({code})] 트레일링 스탑 최고가 갱신: {current_price:,}원")
+            # 최고가 갱신 시에는 매도 조건을 만족하지 않으므로 continue
+            continue 
+        # 최고가 갱신이 없거나, 현재가가 최고가 대비 일정 비율 하락 시 트레일링 스탑 발동
+        elif pnl_pct >= 0.8 and current_price <= trail_high * (1 - TRAIL_STOP_PCT_2ND / 100.0): # TRAIL_STOP_PCT_2ND는 % 값
+            conditions_met.append(("TRAIL_STOP", pnl_pct))
 
         # 보유일 초과
         if hold_days >= MAX_HOLD_DAYS:
@@ -154,7 +157,10 @@ def _sell(stock_code, stock_name, quantity, reason, trade_manager, monitor_posit
 
     if result["status"] == "success":
         logger.info(f"✅ {stock_name}({stock_code}) {reason} 매도 주문 성공. 주문번호: {result.get('order_no')}")
-        # MonitorPositions에서 체결 이벤트를 통해 자동으로 포지션 업데이트/삭제됨
+        # 매도 성공 시, MonitorPositions에서 체결 이벤트를 통해 자동으로 포지션 업데이트/삭제됨
+        if reason == "익절 (절반)":
+            monitor_positions.mark_half_sold(stock_code)
+        # 전량 매도인 경우 MonitorPositions에서 해당 종목이 제거될 것임
     else:
         logger.error(f"❌ {stock_name}({stock_code}) {reason} 매도 주문 실패: {result.get('message', '알 수 없는 오류')}")
         send_telegram_message(f"❌ 매도 실패: {stock_name}({stock_code}) - {reason} ({result.get('message', '알 수 없는 오류')})")

@@ -16,7 +16,7 @@ def check_buy_conditions(kiwoom_helper, stock_code: str, stock_name: str) -> dic
     real_time_info = kiwoom_helper.real_time_data.get(stock_code, {})
     current_price = real_time_info.get("current_price")
     if current_price is None or current_price == 0:
-        logger.debug(f"⚠️ {stock_name}({stock_code}) 현재가 정보 없음.")
+        logger.debug(f"⚠️ {stock_name}({stock_code}) 현재가 정보 없음. 매수 조건 검사 건너뜀.")
         return None
 
     chegyul_gangdo = real_time_info.get("chegyul_gangdo", 0)
@@ -94,13 +94,14 @@ def execute_buy_strategy(kiwoom_helper, kiwoom_tr_request, trade_manager, monito
     # 매수 금액 (예수금의 50%)
     buy_amount = available_cash * 0.5
     # 매수 수량 계산 (최소 거래 단위 DEFAULT_LOT_SIZE 고려)
+    # // DEFAULT_LOT_SIZE) * DEFAULT_LOT_SIZE 를 통해 DEFAULT_LOT_SIZE의 배수로 수량을 맞춤
     quantity = int(buy_amount / target["current_price"] // DEFAULT_LOT_SIZE) * DEFAULT_LOT_SIZE
 
     if quantity <= 0:
         logger.warning(f"[{current_time_str}] {target['stock_name']}({target['stock_code']}) 매수 가능 수량 부족. 건너뜀.")
         return
 
-    logger.info(f"🚀 {target['stock_name']}({target['stock_code']}) 매수 시도: 수량 {quantity}주, 가격 {target['current_price']:,}원")
+    logger.info(f"� {target['stock_name']}({target['stock_code']}) 매수 시도: 수량 {quantity}주, 가격 {target['current_price']:,}원")
     send_telegram_message(f"🚀 매수 시도: {target['stock_name']}({target['stock_code']}) 수량: {quantity}")
 
     # 시장가 매수 주문 (03: 시장가)

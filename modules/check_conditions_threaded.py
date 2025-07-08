@@ -1,6 +1,8 @@
 # modules/check_conditions_threaded.py
 
 import pandas as pd
+import concurrent.futures # concurrent.futures.as_completed 사용을 위해 추가
+import sys # sys.stdout 사용을 위해 추가
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import logging
@@ -13,12 +15,13 @@ from modules.common.config import (
     EXCLUDE_NAME_KEYWORDS,
     EXCLUDE_STATUS_KEYWORDS,
     MIN_DATA_POINTS,
-    CONDITION_CHECK_MAX_WORKERS
+    CONDITION_CHECK_MAX_WORKERS,
+    MIN_PRICE, # is_passing_conditions에서 사용
+    MAX_PRICE  # is_passing_conditions에서 사용
 )
 # KiwoomQueryHelper는 QApplication 인스턴스를 필요로 하므로,
 # 실제 실행 환경에서 QApplication이 이미 생성되어 있어야 합니다.
 # 여기서는 KiwoomQueryHelper를 인스턴스화할 때 app 인자를 전달해야 합니다.
-# local_api_server.py에서 이 함수를 호출할 때 kiwoom_helper 인스턴스를 전달하도록 변경해야 합니다.
 # from modules.Kiwoom.kiwoom_query_helper import KiwoomQueryHelper # 직접 임포트 대신 인자로 받도록 변경
 
 logger = logging.getLogger(__name__)
@@ -29,7 +32,7 @@ def get_daily_data(kiwoom_helper, stock_code: str) -> pd.DataFrame | None:
     """
     try:
         today_str = datetime.today().strftime("%Y%m%d")
-        # ✅ kiwoom_helper의 request_daily_ohlcv 메서드 사용
+        # kiwoom_helper의 request_daily_ohlcv 메서드 사용
         data = kiwoom_helper.request_daily_ohlcv(stock_code, today_str)
         if data and not data.get("error"):
             df = pd.DataFrame(data["data"])
@@ -82,7 +85,6 @@ def is_passing_conditions(df: pd.DataFrame) -> bool:
         return False
 
     # 주가 범위 조건 (config에서 가져올 수 있음)
-    from modules.common.config import MIN_PRICE, MAX_PRICE
     if not (MIN_PRICE <= current_price <= MAX_PRICE):
         # logger.debug(f"가격 범위 미충족: {current_price} (범위: {MIN_PRICE}~{MAX_PRICE})")
         return False
@@ -104,7 +106,7 @@ def get_filtered_tickers(kiwoom_helper, market_code: str) -> list:
             if any(keyword in name for keyword in EXCLUDE_NAME_KEYWORDS):
                 continue
 
-            # ✅ kiwoom_helper의 get_stock_state 메서드 사용
+            # kiwoom_helper의 get_stock_state 메서드 사용
             state = kiwoom_helper.get_stock_state(code)
             if any(keyword in state for keyword in EXCLUDE_STATUS_KEYWORDS):
                 continue
@@ -132,19 +134,20 @@ def filter_candidate(code: str, name: str, kiwoom_helper) -> dict | None:
         logger.error(f"filter_candidate 오류 ({code}): {e}", exc_info=True)
         return None
 
-def run_condition_filter_and_return_df(kiwoom_helper) -> pd.DataFrame:
+def run_condition_filter_and_return_df(kiwoom_helper, max_workers: int) -> pd.DataFrame:
     """
     조건 검색 필터를 실행하고 결과 DataFrame을 반환합니다.
     스레드 풀을 사용하여 여러 시장의 종목을 병렬로 처리합니다.
     Args:
         kiwoom_helper: 초기화된 KiwoomQueryHelper 인스턴스
+        max_workers (int): 스레드 풀의 최대 작업자 수
     Returns:
         pd.DataFrame: 조건을 통과한 종목들의 데이터프레임
     """
     logger.info("📊 조건검색 실행 시작 (스레드 기반 필터)...")
     candidate_list = []
 
-    with ThreadPoolExecutor(max_workers=CONDITION_CHECK_MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
         for market_code in MARKET_CODES:
             # 각 시장별로 종목 리스트를 가져와서 개별 종목 필터링 작업을 제출
@@ -155,8 +158,9 @@ def run_condition_filter_and_return_df(kiwoom_helper) -> pd.DataFrame:
         # 진행률 표시
         total_tickers_processed = 0
         total_futures = len(futures)
-        sys.stdout.write(f"🔍 종목 검사 중: 0/{total_futures} 완료 (0개 통과)")
-        sys.stdout.flush()
+        if total_futures > 0: # 퓨처가 있을 때만 진행률 표시
+            sys.stdout.write(f"🔍 종목 검사 중: 0/{total_futures} 완료 (0개 통과)")
+            sys.stdout.flush()
 
         for future in concurrent.futures.as_completed(futures):
             result = future.result()
@@ -164,10 +168,12 @@ def run_condition_filter_and_return_df(kiwoom_helper) -> pd.DataFrame:
                 candidate_list.append(result)
 
             total_tickers_processed += 1
-            sys.stdout.write(f"\r🔍 종목 검사 중: {total_tickers_processed}/{total_futures} 완료 ({len(candidate_list)}개 통과)")
-            sys.stdout.flush()
+            if total_futures > 0: # 퓨처가 있을 때만 진행률 업데이트
+                sys.stdout.write(f"\r🔍 종목 검사 중: {total_tickers_processed}/{total_futures} 완료 ({len(candidate_list)}개 통과)")
+                sys.stdout.flush()
 
-    sys.stdout.write("\n") # 진행률 표시 후 줄 바꿈
+    if total_futures > 0: # 퓨처가 있을 때만 줄 바꿈
+        sys.stdout.write("\n") # 진행률 표시 후 줄 바꿈
 
     if not candidate_list:
         logger.info("📭 조건검색 결과: 조건을 만족하는 종목 없음.")
@@ -176,3 +182,4 @@ def run_condition_filter_and_return_df(kiwoom_helper) -> pd.DataFrame:
     df = pd.DataFrame(candidate_list)
     logger.info(f"📈 조건검색 통과 종목 수: {len(df)}개")
     return df
+

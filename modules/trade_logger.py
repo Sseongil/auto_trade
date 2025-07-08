@@ -28,7 +28,7 @@ class TradeLogger:
                         "timestamp", "stock_code", "stock_name", "trade_type",
                         "quantity", "price", "order_no", "result", "message"
                     ])
-            logger.info(f"✅ 거래 로그 파일 '{TRADE_LOG_FILE}'이(가) 생성되었습니다. (헤더 포함)")
+                logger.info(f"✅ 거래 로그 파일 '{TRADE_LOG_FILE}'이(가) 생성되었습니다. (헤더 포함)")
         else:
             logger.info(f"✅ 기존 거래 로그 파일 '{TRADE_LOG_FILE}'을(를) 사용합니다.")
 

@@ -32,7 +32,7 @@ class KiwoomTrRequest:
                 logger.info(f"TR 요청 시도 {attempt}/{retry_attempts}: rq_name='{rq_name}', tr_code='{tr_code}', screen_no='{screen_no}'")
                 self.kiwoom_helper.tr_event_loop.reset() # TR 요청 전에 루프 초기화
                 ret = self.kiwoom_helper.kiwoom.dynamicCall("CommRqData(QString, QString, int, QString)",
-                                                             rq_name, tr_code, int(prev_next), screen_no)
+                                                            rq_name, tr_code, int(prev_next), screen_no)
 
                 if ret == 0:
                     if self.kiwoom_helper.tr_event_loop.wait(timeout_ms=timeout_ms): # 응답 대기

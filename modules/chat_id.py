@@ -1,15 +1,17 @@
 # modules/chat_id.py
 
-
 from telegram import Bot
-import sys # Import sys for better error handling if needed, though not strictly used here
+import sys
+import os # os 모듈 임포트
+from dotenv import load_dotenv # dotenv 임포트
+
+load_dotenv() # .env 파일에서 환경 변수 로드
 
 # Your Telegram Bot Token. Keep this secure!
 # DO NOT hardcode sensitive tokens in production code or commit them to public repositories.
 # For local testing, it's fine, but consider environment variables for deployment.
-TOKEN = "8081086653:AAFbATaP5fUVOJztvPtxQWaMRF0WPEOkUqo"
-# You can replace this with your actual chat ID once you get it:
-# CHAT_ID = "1866728370" 
+# TOKEN = "YOUR_BOT_TOKEN_HERE" # 직접 하드코딩 대신 환경 변수에서 로드
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 def get_telegram_chat_id():
     """
@@ -21,6 +23,10 @@ def get_telegram_chat_id():
     2. Send a message to your bot.
     3. Run this script. The chat ID should appear in your console.
     """
+    if not TOKEN:
+        print("❌ TELEGRAM_BOT_TOKEN 환경 변수가 설정되지 않았습니다. .env 파일을 확인하세요.")
+        return None
+
     print("🚀 텔레그램 챗 ID 가져오기 시작...")
     print("👉 봇에게 메시지를 보내고 이 스크립트를 실행하면 챗 ID가 출력됩니다.")
 
@@ -54,3 +60,4 @@ def get_telegram_chat_id():
 
 if __name__ == "__main__":
     get_telegram_chat_id()
+

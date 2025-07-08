@@ -104,3 +104,4 @@ def generate_daily_trade_report() -> None:
 
 if __name__ == "__main__":
     generate_daily_trade_report()
+

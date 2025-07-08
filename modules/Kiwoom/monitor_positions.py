@@ -67,49 +67,50 @@ class MonitorPositions:
         """
         with self.position_lock:
             stock_name = self.kiwoom_helper.get_stock_name(stock_code)
-            current_qty = self.positions.get(stock_code, {}).get("quantity", 0)
-
-            if new_quantity > current_qty: # 매수 또는 추가 매수
-                # 기존에 없던 종목이거나, 수량이 증가했을 때 매입가와 매수일시를 업데이트
-                # (평균 단가 계산 로직은 더 복잡하므로 여기서는 단순화)
+            current_pos = self.positions.get(stock_code, {})
+            current_qty = current_pos.get("quantity", 0)
+            
+            if new_quantity > 0: # 매수 또는 추가 매수 (수량이 0보다 클 때만 처리)
                 if stock_code not in self.positions:
+                    # 새로운 포지션 추가
                     self.positions[stock_code] = {
                         "stock_code": stock_code,
                         "quantity": new_quantity,
-                        "purchase_price": new_purchase_price if new_purchase_price else 0.0,
-                        "total_purchase_amount": new_purchase_price * new_quantity if new_purchase_price else 0.0,
+                        "purchase_price": new_purchase_price if new_purchase_price else 0,
                         "buy_date": datetime.today().strftime("%Y-%m-%d"),
                         "buy_time": new_buy_time if new_buy_time else datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "half_exited": False,
-                        "trail_high": new_purchase_price if new_purchase_price else 0.0, # 매수 시 trail_high는 매입가로 초기화
-                        "name": stock_name
+                        "trail_high": new_purchase_price if new_purchase_price else 0, # 매수 시 trail_high는 매입가로 초기화
+                        "name": stock_name,
+                        "current_price": self.kiwoom_helper.get_current_price(stock_code) # 현재가도 업데이트
                     }
-                    logger.info(f"New position: {stock_name}({stock_code}) x{new_quantity}")
+                    logger.info(f"New position added: {stock_name}({stock_code}) Qty: {new_quantity}, Price: {new_purchase_price}")
                 else:
-                    # 기존 포지션에 추가 매수 시 평균단가 및 총 매수금액 업데이트 (간단화된 로직)
-                    old_qty = self.positions[stock_code]["quantity"]
-                    old_purchase_price = self.positions[stock_code]["purchase_price"]
-                    old_total_amount = old_qty * old_purchase_price
-
-                    added_qty = new_quantity - old_qty
-                    if added_qty > 0 and new_purchase_price:
-                        new_total_amount = old_total_amount + (added_qty * new_purchase_price)
-                        self.positions[stock_code]["quantity"] = new_quantity
-                        self.positions[stock_code]["purchase_price"] = new_total_amount / new_quantity
-                        self.positions[stock_code]["total_purchase_amount"] = new_total_amount
+                    # 기존 포지션 업데이트 (평균 단가 재계산)
+                    old_qty = current_pos["quantity"]
+                    old_purchase_price = current_pos["purchase_price"]
+                    
+                    # 매수 수량이 증가한 경우에만 평균 단가 재계산
+                    if new_quantity > old_qty and new_purchase_price is not None:
+                        total_amount_before = old_qty * old_purchase_price
+                        total_amount_after = total_amount_before + ((new_quantity - old_qty) * new_purchase_price)
+                        self.positions[stock_code]["purchase_price"] = total_amount_after / new_quantity
                         self.positions[stock_code]["buy_time"] = new_buy_time if new_buy_time else datetime.now().strftime("%Y-%m-%d %H:%M:%S") # 매수 시간 갱신
-                        logger.info(f"Updated quantity and avg price for {stock_code}: Qty {new_quantity}, Avg Price {self.positions[stock_code]['purchase_price']:.2f}")
-                    else:
-                        self.positions[stock_code]["quantity"] = new_quantity
-                        logger.info(f"Updated quantity for {stock_code}: {new_quantity}")
+                        logger.info(f"Updated position (added): {stock_name}({stock_code}) Qty: {new_quantity}, Avg Price: {self.positions[stock_code]['purchase_price']:.2f}")
+                    
+                    self.positions[stock_code]["quantity"] = new_quantity
+                    self.positions[stock_code]["current_price"] = self.kiwoom_helper.get_current_price(stock_code) # 현재가도 업데이트
+                    logger.info(f"Updated position: {stock_name}({stock_code}) Qty: {new_quantity}")
 
-            elif new_quantity < current_qty: # 매도
-                self.positions[stock_code]["quantity"] = new_quantity
-                if new_quantity == 0:
-                    self.remove_position(stock_code)
-                    logger.info(f"Chejan update: {stock_code} fully sold. Position removed.")
-                else:
-                    logger.info(f"Chejan update: {stock_code} position decreased. Remaining Qty: {new_quantity}")
+            elif new_quantity == 0 and stock_code in self.positions: # 전량 매도 시
+                self.remove_position(stock_code)
+                logger.info(f"Position removed: {stock_name}({stock_code}) (quantity became 0)")
+            else: # 수량이 줄어들었지만 0이 아닌 경우 (부분 매도)
+                if stock_code in self.positions:
+                    self.positions[stock_code]["quantity"] = new_quantity
+                    self.positions[stock_code]["current_price"] = self.kiwoom_helper.get_current_price(stock_code) # 현재가도 업데이트
+                    logger.info(f"Position decreased: {stock_name}({stock_code}) Remaining Qty: {new_quantity}")
+
 
             self.save_positions()
 
@@ -121,7 +122,11 @@ class MonitorPositions:
     def get_all_positions(self):
         """현재 보유 중인 모든 포지션 데이터를 반환합니다 (사본 반환)."""
         with self.position_lock:
-            return self.positions.copy()
+            # 반환 시점에 현재가 업데이트 (실시간 데이터 활용)
+            updated_positions = self.positions.copy()
+            for code, pos_data in updated_positions.items():
+                pos_data['current_price'] = self.kiwoom_helper.get_current_price(code)
+            return updated_positions
 
     def remove_position(self, stock_code):
         """특정 종목의 포지션 데이터를 삭제합니다 (보통 전량 매도 후 호출)."""
@@ -140,7 +145,6 @@ class MonitorPositions:
                 self.save_positions()
                 logger.info(f"{stock_code} marked as half_exited.")
 
-    # ✅ 신규 추가: 트레일링 스탑 최고가 업데이트
     def update_position_trail_high(self, stock_code, new_high_price):
         """
         특정 종목의 트레일링 스탑 최고가를 업데이트합니다.
@@ -152,3 +156,4 @@ class MonitorPositions:
                     self.positions[stock_code]["trail_high"] = new_high_price
                     self.save_positions()
                     logger.debug(f"[{stock_code}] Trail high updated to {new_high_price:.2f}")
+

@@ -17,6 +17,8 @@ class KiwoomQueryHelper(QObject): # QObject 상속
     real_time_signal = pyqtSignal(dict)
     # TR 데이터 수신 시 외부로 시그널 전송 (필요시)
     tr_data_signal = pyqtSignal(str, str, str, dict)
+    # 실시간 조건 검색 종목 편입/이탈 시그널
+    real_condition_signal = pyqtSignal(str, str, str, str) # code, event_type, condition_name, condition_index
 
     def __init__(self, kiwoom_ocx: QAxWidget, pyqt_app: QApplication):
         super().__init__()
@@ -134,25 +136,33 @@ class KiwoomQueryHelper(QObject): # QObject 상속
         self.kiwoom.dynamicCall("SetRealRemove(QString, QString)", screen_no, codes)
         logger.info(f"SetRealRemove 호출: 화면번호 {screen_no}, 종목 {codes}")
 
-# 중략 ...
-
     def _safe_get_real_data(self, code: str, fid: int, default=0, as_float=False):
         """빈 문자열 예외 방지를 위한 안전한 GetCommRealData 래퍼"""
         raw = self.kiwoom.dynamicCall("GetCommRealData(QString, int)", code, fid)
         if not raw.strip():
             return default
         try:
-            return float(raw.strip()) if as_float else abs(int(raw.strip()))
+            # '+' 또는 '-' 부호가 포함될 수 있으므로 제거 후 변환
+            cleaned_raw = raw.strip().replace('+', '').replace('-', '')
+            return float(cleaned_raw) if as_float else abs(int(cleaned_raw))
         except ValueError:
-            logger.warning(f"GetCommRealData 변환 실패: 코드={code}, FID={fid}, 값={raw}")
+            logger.warning(f"GetCommRealData 변환 실패: 코드={code}, FID={fid}, 값='{raw}'")
             return default
 
     def _on_receive_real_data(self, code: str, real_type: str, real_data: str):
+        """
+        실시간 시세 데이터 수신 시 호출됩니다.
+        """
+        # REALTIME_FID_LIST에 정의된 FID들을 사용하여 데이터 파싱
+        # FID 10: 현재가, 11: 전일대비, 12: 등락률, 13: 누적거래량, 228: 체결강도, 290: 매수체결량, 291: 매도체결량
         current_price = self._safe_get_real_data(code, 10)
         total_volume = self._safe_get_real_data(code, 13)
         chegyul_gangdo = self._safe_get_real_data(code, 228, as_float=True)
         total_buy_cvol = self._safe_get_real_data(code, 290)
         total_sell_cvol = self._safe_get_real_data(code, 291)
+        
+        # 등락률 (FID 12) 추가
+        change_pct = self._safe_get_real_data(code, 12, as_float=True)
 
         if code not in self.real_time_data:
             self.real_time_data[code] = {}
@@ -163,17 +173,9 @@ class KiwoomQueryHelper(QObject): # QObject 상속
             'chegyul_gangdo': chegyul_gangdo,
             'total_buy_cvol': total_buy_cvol,
             'total_sell_cvol': total_sell_cvol,
+            'change_pct': change_pct, # 등락률 추가
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
-
-        self.real_time_signal.emit({
-            'code': code,
-            'current_price': current_price,
-            'chegyul_gangdo': chegyul_gangdo,
-            'total_buy_cvol': total_buy_cvol,
-            'total_sell_cvol': total_sell_cvol
-        })
-        # logger.debug(f"실시간 데이터 수신: {code}, 현재가: {current_price}, 체결강도: {chegyul_gangdo}")
 
         # 외부로 실시간 데이터 시그널 전송
         self.real_time_signal.emit({
@@ -181,8 +183,10 @@ class KiwoomQueryHelper(QObject): # QObject 상속
             'current_price': current_price,
             'chegyul_gangdo': chegyul_gangdo,
             'total_buy_cvol': total_buy_cvol,
-            'total_sell_cvol': total_sell_cvol
+            'total_sell_cvol': total_sell_cvol,
+            'change_pct': change_pct
         })
+        # logger.debug(f"실시간 데이터 수신: {code}, 현재가: {current_price}, 체결강도: {chegyul_gangdo}")
 
 
     def _on_receive_tr_data(self, screen_no, rq_name, tr_code, record_name, prev_next, data_len, error_code, message, splm_msg):
@@ -198,11 +202,11 @@ class KiwoomQueryHelper(QObject): # QObject 상속
                 for i in range(cnt):
                     row = {
                         "날짜": self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "일자").strip(),
-                        "현재가": abs(int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "현재가"))),
-                        "거래량": abs(int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "거래량"))),
-                        "시가": abs(int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "시가"))),
-                        "고가": abs(int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "고가"))),
-                        "저가": abs(int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "저가"))),
+                        "현재가": abs(int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "현재가").strip())),
+                        "거래량": abs(int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "거래량").strip())),
+                        "시가": abs(int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "시가").strip())),
+                        "고가": abs(int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "고가").strip())),
+                        "저가": abs(int(self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, rq_name, i, "저가").strip())),
                     }
                     rows.append(row)
                 data = {"data": rows, "prev_next": prev_next}
@@ -309,6 +313,16 @@ class KiwoomQueryHelper(QObject): # QObject 상속
             logger.error(f"❌ 조건검색 요청 실패: {condition_name}, 오류: {error_msg}")
             return False
 
+    def SendConditionStop(self, screen_no: str, condition_name: str, index: int):
+        """
+        실시간 조건 검색을 중지합니다.
+        """
+        logger.info(f"🛑 실시간 조건검색 중지 요청: {condition_name} (Index: {index})")
+        self.kiwoom.dynamicCall("SendConditionStop(QString, QString, int)",
+                                 screen_no, condition_name, index)
+        logger.info(f"✅ 실시간 조건검색 중지 요청 완료: {condition_name}")
+
+
     def _on_receive_real_condition(self, code, event_type, condition_name, condition_index):
         """
         실시간 조건 검색 종목 편입/이탈 이벤트 수신 시 호출됩니다.
@@ -317,15 +331,8 @@ class KiwoomQueryHelper(QObject): # QObject 상속
         event_msg = "편입" if event_type == "I" else "이탈" # I: 편입, D: 이탈
         logger.info(f"📡 [조건검색 이벤트] {condition_name} ({condition_index}) - {stock_name}({code}) {event_msg}")
 
-        # 조건 검색 통과 종목 목록 업데이트 (여기서는 간단히 로그만 남김)
-        # 실제 전략에서는 이 이벤트를 활용하여 매수/매도 로직을 트리거할 수 있음.
-        # 예를 들어, self.filtered_df를 업데이트하거나, buy_strategy에 시그널을 보낼 수 있습니다.
-        if event_type == "I": # 편입 시
-            # 여기에 매수 전략을 트리거하는 로직을 추가할 수 있습니다.
-            pass
-        elif event_type == "D": # 이탈 시
-            # 여기에 매도 전략을 트리거하는 로직을 추가할 수 있습니다.
-            pass
+        # 외부로 실시간 조건 변경 시그널 전송
+        self.real_condition_signal.emit(code, event_type, condition_name, str(condition_index))
 
     def get_current_price(self, stock_code: str) -> int:
         """

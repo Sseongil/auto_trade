@@ -38,7 +38,8 @@ app = Flask(__name__, template_folder=os.path.join(script_dir, "templates"), sta
 from common.config import API_SERVER_PORT, API_KEY, ACCOUNT_NUMBERS, ACCOUNT_PASSWORD
 from common.utils import get_current_time_str
 from strategies.main_strategy_loop import (
-    run_daily_trading_cycle, set_strategy_flag, strategy_flags, set_real_condition_info
+    run_daily_trading_cycle, set_strategy_flag, strategy_flags, set_real_condition_info,
+    initialize_real_time_condition_manager # 새로 추가된 함수 임포트
 )
 from trade_logger import TradeLogger
 from notify import send_telegram_message
@@ -153,6 +154,7 @@ def set_real_condition():
             return jsonify({"status": "error", "message": f"조건식 '{name}'을(를) 찾을 수 없습니다."}), 404
         
         screen_no = kiwoom_helper_instance.generate_condition_screen_no()
+        # SendCondition의 search_type은 0(등록) 또는 1(해제)
         success = kiwoom_helper_instance.SendCondition(screen_no, name, index, int(mode))
 
         if success:
@@ -161,6 +163,7 @@ def set_real_condition():
                     set_real_condition_info(name, index) # Update flag in main_strategy_loop module
                     shared_kiwoom_state["real_condition_name"] = name # Update shared state for dashboard
                 else: # 해제
+                    # 조건식 해제 시, main_strategy_loop의 real_condition_name과 index를 None으로 설정
                     set_real_condition_info(None, None) # Update flag in main_strategy_loop module
                     shared_kiwoom_state["real_condition_name"] = None # Update shared state for dashboard
             message = f"조건식 '{name}' {'등록' if mode == '0' else '해제'} 요청 성공."
@@ -228,6 +231,9 @@ def initialize_kiwoom_and_run_trading_loop():
     from Kiwoom.kiwoom_tr_request import KiwoomTrRequest
     from Kiwoom.monitor_positions import MonitorPositions
     from Kiwoom.trade_manager import TradeManager
+    # RealTimeConditionManager도 이 스레드에서 초기화되어야 합니다.
+    from Kiwoom.real_time_condition_manager import RealTimeConditionManager
+    from strategies.main_strategy_loop import initialize_real_time_condition_manager # main_strategy_loop의 초기화 함수 임포트
 
     pythoncom.CoInitialize() # Initialize COM for this thread
 
@@ -250,6 +256,10 @@ def initialize_kiwoom_and_run_trading_loop():
     monitor = MonitorPositions(kiwoom_helper, kiwoom_tr, None, account)
     trade_manager = TradeManager(kiwoom_helper, kiwoom_tr, monitor, account)
     monitor.set_trade_manager(trade_manager)
+
+    # RealTimeConditionManager 초기화 및 main_strategy_loop에 전달
+    initialize_real_time_condition_manager(kiwoom_helper)
+
 
     # Assign instances to global variables for Flask access
     global kiwoom_helper_instance, kiwoom_tr_request_instance, monitor_positions_instance, trade_manager_instance

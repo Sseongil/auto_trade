@@ -1,4 +1,4 @@
-# mo# modules/Kiwoom/real_time_condition_manager.py
+# modules/Kiwoom/real_time_condition_manager.py
 
 import logging
 from PyQt5.QtCore import QObject, QTimer, QEventLoop, pyqtSignal
@@ -35,14 +35,19 @@ class RealTimeConditionManager(QObject):
             condition_name (str): 모니터링할 조건식 이름
             initial_query_timeout_sec (int): 초기 종목 리스트를 기다릴 최대 시간 (초)
         """
-        if self.is_monitoring:
+        if self.is_monitoring and self.condition_name == condition_name:
             logger.warning(f"⚠️ Real-time condition monitoring for '{self.condition_name}' is already running.")
             return
+        
+        # 기존 모니터링 중지 (다른 조건식으로 변경하거나 재시작하는 경우)
+        if self.is_monitoring:
+            self.stop_monitoring()
+            time.sleep(1) # 중지 후 잠시 대기
 
         self.condition_name = condition_name
         
         # 1. 조건식 인덱스 가져오기
-        condition_map = self.kiwoom_helper.get_condition_name_list()
+        condition_map = self.kiwoom_helper.get_condition_list() # get_condition_list로 변경
         if condition_name not in condition_map:
             logger.error(f"❌ Condition '{condition_name}' not found. Please check your Kiwoom conditions.")
             send_telegram_message(f"🚨 조건식 '{condition_name}' 찾을 수 없음. 모니터링 시작 실패.")
@@ -50,9 +55,8 @@ class RealTimeConditionManager(QObject):
 
         self.condition_index = condition_map[condition_name]
         
-        # 2. 고유 화면번호 생성 및 저장
-        # kiwoom_query_helper에서 고유한 화면번호를 생성하도록 개선되었으므로, 이를 활용
-        self.condition_screen_no = self.kiwoom_helper.generate_real_time_screen_no()
+        # 2. 고유 화면번호 생성 및 저장 (조건 검색 전용 화면번호 사용)
+        self.condition_screen_no = self.kiwoom_helper.generate_condition_screen_no()
         logger.info(f"Generated screen number for condition monitoring: {self.condition_screen_no}")
 
         # 3. 현재 조건을 만족하는 종목 초기화 (중요)
@@ -63,11 +67,11 @@ class RealTimeConditionManager(QObject):
         # 4. 일반 조회 (search_type=0)를 통해 현재 조건 만족 종목 리스트를 가져옵니다.
         # 이 호출은 _on_receive_real_condition 이벤트를 트리거하여 currently_passing_stocks를 채웁니다.
         logger.info(f"🧠 Sending initial condition query (search_type=0) for '{condition_name}' on screen {self.condition_screen_no}")
-        ret = self.kiwoom_helper.SendCondition(
+        success = self.kiwoom_helper.SendCondition(
             self.condition_screen_no, self.condition_name, self.condition_index, 0
         )
-        if ret != 1:
-            logger.error(f"❌ Failed to send initial condition query for '{condition_name}'. Return code: {ret}")
+        if not success:
+            logger.error(f"❌ Failed to send initial condition query for '{condition_name}'.")
             send_telegram_message(f"🚨 조건식 초기 조회 실패: {condition_name}")
             return
 
@@ -81,11 +85,11 @@ class RealTimeConditionManager(QObject):
         # 5. 실시간 조회 (search_type=1) 시작
         # 동일한 화면번호로 실시간 조회를 시작하여 기존 일반 조회를 실시간으로 전환
         logger.info(f"🧠 Starting real-time condition monitoring (search_type=1) for '{condition_name}' on screen {self.condition_screen_no}")
-        ret = self.kiwoom_helper.SendCondition(
+        success = self.kiwoom_helper.SendCondition(
             self.condition_screen_no, self.condition_name, self.condition_index, 1
         )
-        if ret != 1:
-            logger.error(f"❌ Failed to start real-time condition monitoring for '{condition_name}'. Return code: {ret}")
+        if not success:
+            logger.error(f"❌ Failed to start real-time condition monitoring for '{condition_name}'.")
             send_telegram_message(f"🚨 조건식 실시간 감시 시작 실패: {condition_name}")
             return
 
@@ -106,14 +110,12 @@ class RealTimeConditionManager(QObject):
 
         if self.condition_screen_no and self.condition_name and self.condition_index is not None:
             # 1. 실시간 조건검색 중지 요청
-            # SendConditionStop은 특정 조건식의 실시간 감시를 중지
             self.kiwoom_helper.SendConditionStop(
                 self.condition_screen_no, self.condition_name, self.condition_index
             )
             logger.info(f"Sent SendConditionStop for '{self.condition_name}'.")
 
             # 2. 해당 화면번호에 등록된 모든 실시간 데이터 해제
-            # 조건식 실시간 외에 다른 실시간 데이터가 해당 화면번호에 등록되어 있을 수 있으므로 "ALL"로 해제
             self.kiwoom_helper.SetRealRemove(self.condition_screen_no, "ALL")
             logger.info(f"Called SetRealRemove for screen {self.condition_screen_no}.")
         else:
