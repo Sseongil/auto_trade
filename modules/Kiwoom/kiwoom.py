@@ -1,4 +1,4 @@
-# pykiwoom/kiwoom.py
+# modules/Kiwoom/kiwoom.py
 
 import os
 import sys

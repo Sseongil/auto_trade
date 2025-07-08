@@ -1,4 +1,4 @@
-# modules/real_time_condition_manager.py
+# mo# modules/Kiwoom/real_time_condition_manager.py
 
 import logging
 from PyQt5.QtCore import QObject, QTimer, QEventLoop, pyqtSignal

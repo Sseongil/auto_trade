@@ -1,3 +1,6 @@
+# modules/real_time_watcher.py
+
+
 import logging
 from PyQt5.QtCore import QObject
 from modules.common.utils import get_current_time_str
