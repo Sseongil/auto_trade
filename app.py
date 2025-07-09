@@ -7,6 +7,9 @@ from flask import Flask, request, jsonify
 import requests
 from dotenv import load_dotenv
 
+# modules.notify에서 send_telegram_message 함수 임포트
+from modules.notify import send_telegram_message as notify_telegram_message
+
 # 로깅 설정 (Render 로그에 표시될 내용)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -18,8 +21,9 @@ app = Flask(__name__)
 
 # --- 환경 변수 로드 ---
 # 텔레그램 봇 토큰 및 채팅 ID (Render 환경 변수에 설정되어야 함)
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+# notify.py에서 이미 로드하므로 여기서는 직접 사용하지 않음.
+# TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+# TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # 로컬 API 서버의 현재 ngrok URL을 저장할 변수
 # 초기값은 없지만, 로컬 서버가 업데이트 요청을 보내면 저장될 것임
@@ -33,24 +37,8 @@ if not INTERNAL_API_KEY:
     # 실제 프로덕션 환경에서는 sys.exit(1)로 종료할 수 있지만,
     # 여기서는 로그만 남기고 일단 진행 (테스트 편의상)
 
-# --- 헬퍼 함수: 텔레그램 메시지 전송 ---
-def send_telegram_message(message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logger.warning("⚠️ Telegram bot token or chat ID not set. Cannot send message.")
-        return
-    
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown" # 메시지 포맷팅을 위해 Markdown 사용
-    }
-    try:
-        response = requests.post(url, json=payload, timeout=5)
-        response.raise_for_status()
-        logger.info(f"✅ Telegram message sent successfully: {message[:50]}...")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Failed to send Telegram message: {e}")
+# --- 헬퍼 함수: 텔레그램 메시지 전송 (notify.py의 함수 사용) ---
+# 기존 send_telegram_message 함수는 삭제하고 notify_telegram_message를 사용
 
 # --- Render 서버 엔드포인트 ---
 
@@ -78,7 +66,7 @@ def update_ngrok_internal():
     if new_url:
         NGROK_PUBLIC_URL = new_url
         logger.info(f"✅ Ngrok URL 업데이트됨: {NGROK_PUBLIC_URL}")
-        send_telegram_message(f"📡 Ngrok URL이 Render 서버에 업데이트됨:\n`{NGROK_PUBLIC_URL}`")
+        notify_telegram_message(f"📡 Ngrok URL이 Render 서버에 업데이트됨:\n`{NGROK_PUBLIC_URL}`")
         return jsonify({"status": "ok", "message": "ngrok URL updated"}), 200
     else:
         logger.warning("⚠️ Ngrok URL 업데이트 요청에 new_url이 누락되었습니다.")
@@ -93,7 +81,7 @@ def telegram_webhook():
         logger.warning("⚠️ Webhook: Request is not JSON.")
         return jsonify({"status": "error", "message": "Request must be JSON"}), 400
 
-    update = request.get_json()
+    update = request.get('message', {}) # update.get('message', {})로 변경
     logger.info(f"Received Telegram update: {update}")
 
     # 텔레그램 메시지 파싱
@@ -104,10 +92,13 @@ def telegram_webhook():
     if chat_id and text:
         logger.info(f"Telegram message from {chat_id}: {text}")
 
+        # TELEGRAM_CHAT_ID를 notify.py에서 가져오도록 변경
+        telegram_chat_id_from_env = os.environ.get("TELEGRAM_CHAT_ID")
+
         if text == '/status':
             # 텔레그램 채팅 ID가 설정된 ID와 일치하는지 확인 (보안 강화)
-            if str(chat_id) != TELEGRAM_CHAT_ID:
-                send_telegram_message(f"🚨 경고: 알 수 없는 사용자({chat_id})로부터 /status 명령 수신. 허용되지 않은 접근.")
+            if str(chat_id) != telegram_chat_id_from_env:
+                notify_telegram_message(f"🚨 경고: 알 수 없는 사용자({chat_id})로부터 /status 명령 수신. 허용되지 않은 접근.")
                 logger.warning(f"Unauthorized /status command from chat_id: {chat_id}")
                 return jsonify({"status": "unauthorized"}), 200 # Unauthorized 응답이지만 텔레그램에는 OK
                 
@@ -129,6 +120,11 @@ def telegram_webhook():
                         f"▪️ 계좌 번호: `{status_data.get('account_number', 'N/A')}`\n"
                         f"▪️ 예수금: `{status_data.get('balance', 0):,} KRW`\n"
                         f"▪️ 마지막 업데이트: `{status_data.get('last_kiwoom_update', 'N/A')}`\n"
+                        f"▪️ 조건 검색 활성화: `{'✅' if status_data.get('condition_check_enabled') else '❌'}`\n"
+                        f"▪️ 매수 전략 활성화: `{'✅' if status_data.get('buy_strategy_enabled') else '❌'}`\n"
+                        f"▪️ 익절/손절 전략 활성화: `{'✅' if status_data.get('exit_strategy_enabled') else '❌'}`\n"
+                        f"▪️ 현재 조건식: `{status_data.get('real_condition_name', '없음')}`\n"
+                        f"▪️ ngrok URL: `{status_data.get('ngrok_url', 'N/A')}`\n"
                     )
                     
                     positions = status_data.get('positions', {})
@@ -142,22 +138,22 @@ def telegram_webhook():
                     else:
                         status_message += "\n_보유 종목 없음_\n"
 
-                    send_telegram_message(status_message)
+                    notify_telegram_message(status_message)
 
                 except requests.exceptions.RequestException as e:
                     error_msg = f"❌ 로컬 API 서버 상태 조회 실패: {e}"
                     logger.error(error_msg, exc_info=True)
-                    send_telegram_message(f"🚨 로컬 API 서버 상태 조회 실패: `{e}`. ngrok이 실행 중인지, 로컬 서버가 작동하는지 확인하세요.")
+                    notify_telegram_message(f"🚨 로컬 API 서버 상태 조회 실패: `{e}`. ngrok이 실행 중인지, 로컬 서버가 작동하는지 확인하세요.")
                 except Exception as e:
                     error_msg = f"❌ 상태 메시지 처리 중 예기치 않은 오류: {e}"
                     logger.error(error_msg, exc_info=True)
-                    send_telegram_message(f"🚨 상태 메시지 처리 중 오류: `{e}`")
+                    notify_telegram_message(f"🚨 상태 메시지 처리 중 오류: `{e}`")
             else:
-                send_telegram_message("⚠️ Ngrok URL이 아직 Render 서버에 등록되지 않았습니다.")
+                notify_telegram_message("⚠️ Ngrok URL이 아직 Render 서버에 등록되지 않았습니다.")
                 logger.warning("Ngrok URL not set on Render server.")
         else:
             # 다른 메시지는 무시하거나 기본 응답 제공
-            # send_telegram_message("알 수 없는 명령입니다. /status를 입력해 주세요.")
+            # notify_telegram_message("알 수 없는 명령입니다. /status를 입력해 주세요.")
             pass # 불필요한 응답 방지
 
     return jsonify({"status": "ok"}), 200 # 텔레그램에 200 OK 응답
@@ -166,3 +162,4 @@ def telegram_webhook():
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000)) # Render는 보통 10000 포트 사용
     app.run(host='0.0.0.0', port=port)
+

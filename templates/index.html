@@ -273,9 +273,9 @@
                 const response = await fetch(`${API_BASE_URL}/status`, {
                     headers: { 'X-API-Key': API_KEY }
                 });
-                const data = await response.json();
-
-                if (data.status === 'ok' || data.status === 'initializing') {
+                
+                if (response.ok) { // HTTP 상태 코드가 2xx인 경우
+                    const data = await response.json(); // 응답이 성공적일 때만 JSON 파싱
                     document.getElementById('serverTime').textContent = data.server_time;
                     document.getElementById('accountNumber').textContent = data.account_number;
                     document.getElementById('balance').textContent = `${data.balance.toLocaleString()}원`;
@@ -296,7 +296,10 @@
 
                     updatePositionsTable(data.positions);
                 } else {
-                    showMessage(`상태 로드 실패: ${data.message}`, 'error');
+                    // 서버에서 비-2xx 상태 코드를 반환하는 경우 (예: 404, 500)
+                    const errorText = await response.text(); // 응답 본문을 텍스트로 읽어 디버깅 정보 확보
+                    console.error(`Server returned non-OK status for /status: ${response.status} ${response.statusText}, body:`, errorText);
+                    showMessage(`상태 로드 실패: ${response.statusText || '알 수 없는 오류'}`, 'error');
                 }
             } catch (error) {
                 console.error('Error fetching status:', error);
@@ -310,12 +313,15 @@
                     method: 'GET', // Explicitly set GET
                     headers: { 'X-API-Key': API_KEY }
                 });
-                const data = await response.json();
-
-                if (data.status === 'success') {
+                
+                if (response.ok) { // HTTP 상태 코드가 2xx인 경우
+                    const data = await response.json(); // 응답이 성공적일 때만 JSON 파싱
                     updateTradeHistoryTable(data.trade_history);
                 } else {
-                    showMessage(`거래 내역 로드 실패: ${data.message}`, 'error');
+                    // 서버에서 비-2xx 상태 코드를 반환하는 경우
+                    const errorText = await response.text(); // 응답 본문을 텍스트로 읽어 디버깅 정보 확보
+                    console.error(`Server returned non-OK status for /trade_history: ${response.status} ${response.statusText}, body:`, errorText);
+                    showMessage(`거래 내역 로드 실패: ${response.statusText || '알 수 없는 오류'}`, 'error');
                 }
             } catch (error) {
                 console.error('Error fetching trade history:', error);
@@ -397,11 +403,14 @@
                     },
                     body: JSON.stringify({ strategy_name: strategyName, enabled: enabled })
                 });
-                const data = await response.json();
-                if (data.status === 'success') {
+                
+                if (response.ok) {
+                    const data = await response.json();
                     showMessage(data.message);
                 } else {
-                    showMessage(`전략 토글 실패: ${data.message}`, 'error');
+                    const errorText = await response.text();
+                    console.error(`Server returned non-OK status for /toggle_strategy: ${response.status} ${response.statusText}, body:`, errorText);
+                    showMessage(`전략 토글 실패: ${response.statusText || '알 수 없는 오류'}`, 'error');
                 }
             } catch (error) {
                 console.error('Error toggling strategy:', error);
@@ -421,11 +430,14 @@
                     },
                     body: JSON.stringify({ condition_name: conditionName, search_type: searchType })
                 });
-                const data = await response.json();
-                if (data.status === 'success') {
+                
+                if (response.ok) {
+                    const data = await response.json();
                     showMessage(data.message);
                 } else {
-                    showMessage(`조건식 설정 실패: ${data.message}`, 'error');
+                    const errorText = await response.text();
+                    console.error(`Server returned non-OK status for /set_real_condition: ${response.status} ${response.statusText}, body:`, errorText);
+                    showMessage(`조건식 설정 실패: ${response.statusText || '알 수 없는 오류'}`, 'error');
                 }
             } catch (error) {
                 console.error('Error setting real condition:', error);
@@ -447,11 +459,14 @@
                         'X-API-Key': API_KEY
                     }
                 });
-                const data = await response.json();
-                if (data.status === 'success') {
+                
+                if (response.ok) {
+                    const data = await response.json();
                     showMessage(data.message);
                 } else {
-                    showMessage(`거래 내역 삭제 실패: ${data.message}`, 'error');
+                    const errorText = await response.text();
+                    console.error(`Server returned non-OK status for /trade_history/clear: ${response.status} ${response.statusText}, body:`, errorText);
+                    showMessage(`거래 내역 삭제 실패: ${response.statusText || '알 수 없는 오류'}`, 'error');
                 }
             } catch (error) {
                 console.error('Error clearing trade history:', error);

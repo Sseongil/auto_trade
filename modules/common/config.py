@@ -10,7 +10,7 @@ API_SERVER_PORT = int(os.getenv("API_SERVER_PORT", 5000))
 # 'LOCAL_API_KEY' 대신 'API_KEY'로 통일하여 사용
 API_KEY = os.getenv("API_KEY", "your_local_api_key_here")
 
-# --- Kiwoom API 계정 정보 ---
+# --- Kiwoom API 계좌 정보 ---
 ACCOUNT_NUMBERS = os.getenv("ACCOUNT_NUMBERS", "")
 ACCOUNT_PASSWORD = os.getenv("ACCOUNT_PASSWORD", "")
 
@@ -22,7 +22,7 @@ DATA_DIR = os.path.join(ROOT_DIR, "data")
 LOG_DIR = os.path.join(ROOT_DIR, "logs")
 
 POSITIONS_FILE_PATH = os.path.join(DATA_DIR, "positions.json")
-TRADE_LOG_FILE_PATH = os.path.join(LOG_DIR, "trade_log.csv")
+TRADE_LOG_FILE_PATH = os.path.join(LOG_DIR, "trade_log.csv") # config.py에서 경로 구성
 
 # --- 전략 및 시장 설정 ---
 # 실시간 데이터 FID (Field ID) 목록
@@ -49,7 +49,7 @@ DEFAULT_LOT_SIZE = int(os.getenv("DEFAULT_LOT_SIZE", 1)) # 최소 거래 단위 
 # 익절/손절 전략 파라미터 (예시 값, 실제 전략에 맞게 조정 필요)
 TAKE_PROFIT_PCT_1ST = float(os.getenv("TAKE_PROFIT_PCT_1ST", 2.0)) # 1차 익절 수익률 (%)
 TRAIL_STOP_PCT_2ND = float(os.getenv("TRAIL_STOP_PCT_2ND", 0.8)) # 트레일링 스탑 손절률 (최고가 대비 하락률)
-STOP_LOSS_PCT_ABS = float(os.getenv("STOP_LOSS_PCT_ABS", 1.2)) # 절대 손절률 (%) (양수로 표현, 손실률이므로 내부적으로 음수 처리)
+STOP_LOSS_PCT_ABS = float(os.getenv("STOP_LOSS_PCT", 1.2)) # 절대 손절률 (%) (양수로 표현, .env에서 양수로 받음)
 MAX_HOLD_DAYS = int(os.getenv("MAX_HOLD_DAYS", 5)) # 최대 보유 일수
 
 # 익절/손절 전략 우선순위 (PROFIT_FIRST 또는 LOSS_FIRST)

@@ -2,18 +2,16 @@
 
 from telegram import Bot
 import sys
-import os # os 모듈 임포트
-from dotenv import load_dotenv # dotenv 임포트
+import os
+from dotenv import load_dotenv
+import asyncio # asyncio 모듈 임포트
 
 load_dotenv() # .env 파일에서 환경 변수 로드
 
 # Your Telegram Bot Token. Keep this secure!
-# DO NOT hardcode sensitive tokens in production code or commit them to public repositories.
-# For local testing, it's fine, but consider environment variables for deployment.
-# TOKEN = "YOUR_BOT_TOKEN_HERE" # 직접 하드코딩 대신 환경 변수에서 로드
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-def get_telegram_chat_id():
+async def get_telegram_chat_id(): # 함수를 async로 선언
     """
     Connects to the Telegram Bot API, retrieves recent updates, and prints
     the chat ID from any messages received.
@@ -33,8 +31,8 @@ def get_telegram_chat_id():
     try:
         bot = Bot(token=TOKEN)
         # Fetch updates. timeout can be adjusted if you expect many updates.
-        # last_update_id can be used to get only new updates.
-        updates = bot.get_updates(timeout=10) 
+        # await 키워드를 사용하여 비동기 함수 호출
+        updates = await bot.get_updates(timeout=10) 
 
         if not updates:
             print("❌ 새로운 메시지를 찾을 수 없습니다. 봇에게 메시지를 보냈는지 확인하세요.")
@@ -59,5 +57,6 @@ def get_telegram_chat_id():
     print("--- 텔레그램 챗 ID 가져오기 완료 ---")
 
 if __name__ == "__main__":
-    get_telegram_chat_id()
+    # asyncio.run()을 사용하여 비동기 함수 실행
+    asyncio.run(get_telegram_chat_id())
 
