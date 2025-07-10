@@ -1,29 +1,20 @@
 @echo off
+chcp 65001 > nul
 setlocal
 
-:: Python 실행 경로 (가상환경 또는 시스템 Python)
-set PYTHON_PATH=C:\Users\user\stock_auto\venv\Scripts\python.exe
+REM === 사용자 설정 ===
+set NGROK_PATH=C:\ngrok\ngrok.exe
+set PYTHON_EXEC=C:\Users\user\stock_auto\venv\Scripts\python.exe
+set SERVER_SCRIPT=local_api_server.py
 
-:: 프로젝트 루트
-set PROJECT_DIR=C:\Users\user\stock_auto
+REM === ngrok 실행 ===
+start "ngrok" cmd /k "%NGROK_PATH% http 5000 --region=jp"
 
-cd /d %PROJECT_DIR%
+echo [INFO] ngrok이 시작될 때까지 5초간 대기 중...
+timeout /t 5 /nobreak > nul
 
-echo.
-echo [1] --- Flask Local API 서버 실행 ---
-start "Local API Server" cmd /k %PYTHON_PATH% local_api_server.py
-timeout /t 12 >nul
+REM === Flask + PyQt 통합 서버 실행 ===
+start "auto_trade_server" cmd /k "%PYTHON_EXEC% %SERVER_SCRIPT%"
 
-echo.
-echo [2] --- ngrok 실행 ---
-start "Ngrok" cmd /k "C:\ngrok\ngrok.exe" http 5000"
-timeout /t 15 >nul
-
-echo.
-echo [3] --- Render 환경변수 동기화 ---
-chcp 65001 >nul
-start "Render Sync" cmd /k %PYTHON_PATH% run_ngrok_and_update_render.py
-
-echo.
-echo [✅] 모든 자동화 프로세스 시작 완료
+echo [INFO] 자동매매 서버 구동 완료. 창을 닫지 마세요!
 pause
