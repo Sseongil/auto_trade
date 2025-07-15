@@ -14,6 +14,12 @@ API_KEY = os.getenv("API_KEY", "your_local_api_key_here")
 ACCOUNT_NUMBERS = os.getenv("ACCOUNT_NUMBERS", "")
 ACCOUNT_PASSWORD = os.getenv("ACCOUNT_PASSWORD", "")
 
+# --- Render 서비스 연동 정보 (추가) ---
+# 이 값들은 로컬 서버(local_api_server.py)가 Render API와 통신할 때 사용됩니다.
+RENDER_API_KEY = os.getenv("RENDER_API_KEY", "") # Render 계정의 API 키
+RENDER_SERVICE_ID = os.getenv("RENDER_SERVICE_ID", "") # Render 서비스의 고유 ID
+RENDER_DEPLOY_HOOK_URL = os.getenv("RENDER_DEPLOY_HOOK_URL", "") # Render 서비스의 자동 배포 웹훅 URL
+
 # --- 파일 경로 ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # ROOT_DIR은 'modules' 폴더의 부모 폴더 (프로젝트 루트)
@@ -27,7 +33,7 @@ TRADE_LOG_FILE_PATH = os.path.join(LOG_DIR, "trade_log.csv") # config.py에서 �
 # --- 전략 및 시장 설정 ---
 # 실시간 데이터 FID (Field ID) 목록
 # 10: 현재가, 11: 전일대비, 12: 등락률, 13: 누적거래량, 228: 체결강도, 290: 매수체결량, 291: 매도체결량
-REALTIME_FID_LIST = "10;11;12;13;228;290;291"
+REAL_TIME_FIDS = os.getenv("REALTIME_FID_LIST", "10;11;12;13;228;290;291") # REAL_TIME_FIDS로 변수명 통일
 
 # 조건 검색 스레드 풀 최대 워커 수
 CONDITION_CHECK_MAX_WORKERS = int(os.getenv("CONDITION_CHECK_MAX_WORKERS", 6))

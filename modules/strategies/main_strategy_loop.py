@@ -4,7 +4,7 @@ import logging
 import time as time_module
 from datetime import datetime, time
 
-from modules.common.config import REALTIME_FID_LIST
+from modules.common.config import REAL_TIME_FIDS
 from modules.notify import send_telegram_message
 from modules.strategies.check_conditions_runner import get_candidate_stocks_from_condition
 from modules.strategies.buy_strategy import execute_buy_strategy
@@ -154,3 +154,4 @@ def run_daily_trading_cycle(kiwoom_helper, kiwoom_tr_request, monitor_positions,
     run_exit_strategy_step(kiwoom_helper, trade_manager, monitor_positions)
 
     logger.info("🔄 메인 전략 루프 한 사이클 완료.")
+

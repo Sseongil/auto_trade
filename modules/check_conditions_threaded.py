@@ -9,7 +9,7 @@ import logging
 import time
 import traceback # 오류 스택 트레이스 출력을 위해 추가
 
-from modules.Kiwoom.tr_event_loop import TrEventLoop
+# from modules.Kiwoom.tr_event_loop import TrEventLoop # ✅ 제거됨
 from modules.common.config import (
     MARKET_CODES,
     EXCLUDE_NAME_KEYWORDS,
@@ -35,14 +35,25 @@ def get_daily_data(kiwoom_helper, stock_code: str) -> pd.DataFrame | None:
         # kiwoom_helper의 request_daily_ohlcv 메서드 사용
         data = kiwoom_helper.request_daily_ohlcv(stock_code, today_str)
         if data and not data.get("error"):
-            df = pd.DataFrame(data["data"])
-            if "현재가" in df.columns:
-                df['종가'] = df['현재가'].astype(str).str.replace(',', '').str.replace('+', '').str.replace('-', '').astype(int)
-            else:
-                logger.warning(f"[{stock_code}] 일봉 데이터에 '현재가' 컬럼 없음.")
-                return None
+            # 'data' 키 대신 'multi_data' 키를 사용하도록 수정
+            df = pd.DataFrame(data["multi_data"]) # ✅ 'data' -> 'multi_data'로 수정
+            
+            # 컬럼명 통일 및 타입 변환 (kiwoom_query_helper._on_receive_tr_data의 opt10081 필드와 일치)
+            df.columns = [
+                "일자", "현재가", "거래량", "시가", "고가", "저가", "전일대비", "등락률", 
+                "거래원", "개인", "기관", "외인(소진율)", "외인", "상한가", "하한가", 
+                "기준가", "시가총액", "고가율", "저가율", "거래대금", "체결강도"
+            ]
+            
+            # 숫자형 컬럼 변환 (콤마 제거 및 int/float 변환)
+            for col in ["현재가", "거래량", "시가", "고가", "저가", "전일대비", "시가총액", "거래대금"]:
+                df[col] = df[col].astype(str).str.replace(',', '').str.replace('+', '').str.replace('-', '').astype(int)
+            
+            for col in ["등락률", "고가율", "저가율", "체결강도"]:
+                df[col] = df[col].astype(str).str.replace(',', '').astype(float)
 
-            df['날짜'] = pd.to_datetime(df['날짜'])
+            df['종가'] = df['현재가'] # 종가 컬럼을 현재가로 설정 (일봉 데이터의 마지막 가격)
+            df['날짜'] = pd.to_datetime(df['일자'])
             df = df.sort_values("날짜").reset_index(drop=True)
 
             return df
@@ -182,4 +193,3 @@ def run_condition_filter_and_return_df(kiwoom_helper, max_workers: int) -> pd.Da
     df = pd.DataFrame(candidate_list)
     logger.info(f"📈 조건검색 통과 종목 수: {len(df)}개")
     return df
-
