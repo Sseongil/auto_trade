@@ -77,6 +77,10 @@ def telegram_webhook():
     텔레그램 봇으로부터 메시지를 수신하는 웹훅 엔드포인트.
     """
     logger.debug("Received request on /telegram_webhook.") # ✅ Debug log
+    # Render 서버가 현재 어떤 LOCAL_API_SERVER_URL을 사용하고 있는지 로그 출력
+    current_render_ngrok_url = os.environ.get("LOCAL_API_SERVER_URL", "NOT_SET_IN_RENDER_ENV")
+    logger.info(f"Render server's LOCAL_API_SERVER_URL: {current_render_ngrok_url}")
+
     if not request.is_json:
         logger.warning("⚠️ Webhook: Request is not JSON.")
         return jsonify({"status": "error", "message": "Request must be JSON"}), 400
