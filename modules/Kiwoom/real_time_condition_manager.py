@@ -7,6 +7,7 @@ import time
 
 from modules.common.utils import get_current_time_str
 from modules.notify import send_telegram_message
+from modules.Kiwoom.tr_event_loop import TrEventLoop # TrEventLoop 임포트 추가
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class RealTimeConditionManager(QObject):
         self.condition_index = None
         self.condition_screen_no = None
         self.currently_passing_stocks = {} # {stock_code: stock_name}
+        self.tr_event_loop = TrEventLoop.instance() # TrEventLoop 인스턴스 가져오기
 
         # KiwoomQueryHelper의 실시간 조건검색 시그널 연결
         self.kiwoom_helper.real_condition_signal.connect(self._on_receive_real_condition)
@@ -47,7 +49,16 @@ class RealTimeConditionManager(QObject):
         self.condition_name = condition_name
         
         # 1. 조건식 인덱스 가져오기
-        condition_map = self.kiwoom_helper.get_condition_list() # get_condition_list로 변경
+        # 조건식 목록이 로드될 때까지 기다립니다.
+        logger.info("🧠 Waiting for Kiwoom condition list to be loaded...")
+        # kiwoom_helper.get_condition_list_names()를 호출하여 조건식 목록을 서버에서 가져오도록 요청
+        self.kiwoom_helper.get_condition_list_names() 
+        if not self.tr_event_loop.wait_for_condition_version(timeout_ms=initial_query_timeout_sec * 1000):
+            logger.error("❌ Failed to load Kiwoom condition list (timeout).")
+            send_telegram_message("🚨 조건식 목록 로드 실패 (타임아웃). 모니터링 시작 불가.")
+            return
+
+        condition_map = self.kiwoom_helper.get_condition_list() # 이제 조건식 목록이 로드되었을 것임
         if condition_name not in condition_map:
             logger.error(f"❌ Condition '{condition_name}' not found. Please check your Kiwoom conditions.")
             send_telegram_message(f"🚨 조건식 '{condition_name}' 찾을 수 없음. 모니터링 시작 실패.")
@@ -65,7 +76,6 @@ class RealTimeConditionManager(QObject):
         logger.info(f"[{get_current_time_str()}] Initializing currently_passing_stocks for new monitoring session.")
 
         # 4. 일반 조회 (search_type=0)를 통해 현재 조건 만족 종목 리스트를 가져옵니다.
-        # 이 호출은 _on_receive_real_condition 이벤트를 트리거하여 currently_passing_stocks를 채웁니다.
         logger.info(f"🧠 Sending initial condition query (search_type=0) for '{condition_name}' on screen {self.condition_screen_no}")
         success = self.kiwoom_helper.SendCondition(
             self.condition_screen_no, self.condition_name, self.condition_index, 0
@@ -76,14 +86,12 @@ class RealTimeConditionManager(QObject):
             return
 
         # 초기 종목 리스트 수신을 위한 짧은 대기
-        # OnReceiveRealCondition 이벤트가 비동기적으로 발생하므로, 충분한 시간을 줍니다.
         logger.info(f"Waiting {initial_query_timeout_sec} seconds for initial condition results...")
         time.sleep(initial_query_timeout_sec) 
         logger.info(f"Initial condition query processed. Currently passing stocks: {len(self.currently_passing_stocks)} stocks.")
         self.log_current_stocks() # 초기 로드된 종목들 로그
 
         # 5. 실시간 조회 (search_type=1) 시작
-        # 동일한 화면번호로 실시간 조회를 시작하여 기존 일반 조회를 실시간으로 전환
         logger.info(f"🧠 Starting real-time condition monitoring (search_type=1) for '{condition_name}' on screen {self.condition_screen_no}")
         success = self.kiwoom_helper.SendCondition(
             self.condition_screen_no, self.condition_name, self.condition_index, 1
@@ -171,4 +179,3 @@ class RealTimeConditionManager(QObject):
         logger.info(f"[{current_time_str}] 현재 조건을 만족하는 종목 목록 ({len(self.currently_passing_stocks)}개):")
         for code, name in self.currently_passing_stocks.items():
             logger.info(f"  - {name} ({code})")
-

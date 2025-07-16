@@ -1,5 +1,6 @@
 # modules/strategies/main_strategy_loop.py
 
+import pandas as pd
 import logging
 import time as time_module
 from datetime import datetime, time
