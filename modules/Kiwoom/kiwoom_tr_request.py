@@ -1,5 +1,6 @@
 # modules/Kiwoom/kiwoom_tr_request.py
 
+import pandas as pd
 import time
 import logging
 from modules.common.utils import get_current_time_str

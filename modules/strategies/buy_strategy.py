@@ -3,6 +3,7 @@
 import logging
 import time
 from datetime import datetime, timedelta # timedelta 추가
+import pandas as pd # <-- 이 라인을 추가했습니다.
 from modules.common.config import DEFAULT_LOT_SIZE, MIN_HOLD_TIME_MINUTES # MIN_HOLD_TIME_MINUTES 추가
 from modules.notify import send_telegram_message
 from modules.common.utils import get_current_time_str
@@ -101,7 +102,7 @@ def execute_buy_strategy(kiwoom_helper, kiwoom_tr_request, trade_manager, monito
         logger.warning(f"[{current_time_str}] {target['stock_name']}({target['stock_code']}) 매수 가능 수량 부족. 건너뜀.")
         return
 
-    logger.info(f"� {target['stock_name']}({target['stock_code']}) 매수 시도: 수량 {quantity}주, 가격 {target['current_price']:,}원")
+    logger.info(f"🚀 {target['stock_name']}({target['stock_code']}) 매수 시도: 수량 {quantity}주, 가격 {target['current_price']:,}원")
     send_telegram_message(f"🚀 매수 시도: {target['stock_name']}({target['stock_code']}) 수량: {quantity}")
 
     # 시장가 매수 주문 (03: 시장가)
@@ -113,4 +114,3 @@ def execute_buy_strategy(kiwoom_helper, kiwoom_tr_request, trade_manager, monito
     else:
         logger.error(f"❌ {target['stock_name']}({target['stock_code']}) 매수 주문 실패: {result.get('message', '알 수 없는 오류')}")
         send_telegram_message(f"❌ 매수 실패: {target['stock_name']}({target['stock_code']}) - {result.get('message', '알 수 없는 오류')}")
-

@@ -1,5 +1,6 @@
 # modules/Kiwoom/real_time_condition_manager.py
 
+import pandas as pd
 import logging
 from PyQt5.QtCore import QObject, QTimer, QEventLoop, pyqtSignal
 from datetime import datetime
