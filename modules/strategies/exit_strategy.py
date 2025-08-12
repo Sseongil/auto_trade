@@ -1,7 +1,6 @@
 # modules/strategies/exit_strategy.py
 
 import pandas as pd
-
 import logging
 from datetime import datetime, timedelta
 from modules.common.config import (

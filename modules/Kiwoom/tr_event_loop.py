@@ -1,84 +1,102 @@
 # modules/Kiwoom/tr_event_loop.py
 
-from PyQt5.QtCore import QEventLoop, QTimer
-import threading
 import logging
+from PyQt5.QtCore import QEventLoop, QTimer, QObject
 
 logger = logging.getLogger(__name__)
 
-class TrEventLoop:
+class TrEventLoop(QObject):
     _instance = None
-    _lock = threading.Lock()
 
     def __new__(cls):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super(TrEventLoop, cls).__new__(cls)
-                cls._instance._init_once()
+        if cls._instance is None:
+            cls._instance = super(TrEventLoop, cls).__new__(cls)
+            cls._instance._init_singleton()
         return cls._instance
 
-    def _init_once(self):
-        self.loop = QEventLoop()
-        self.timer = QTimer()
-        self.timer.setSingleShot(True)
-        self.timer.timeout.connect(self.loop.quit)
-        self.data = {}
-        self.tr_code_waiting = None
-        self.rq_name_waiting = None
-        # 조건식 버전 수신을 위한 QEventLoop와 플래그
-        self.condition_version_loop = QEventLoop()
+    def _init_singleton(self):
+        self.tr_data_meta = {} # Stores metadata about received TRs
+        self.tr_event_loop = QEventLoop()
         self.condition_version_received_flag = False
-        self.condition_version_timer = QTimer()
-        self.condition_version_timer.setSingleShot(True)
-        self.condition_version_timer.timeout.connect(self.condition_version_loop.quit)
-
+        self.tr_condition_data = {} # For TR condition search results
 
     @classmethod
     def instance(cls):
-        return cls.__new__(cls)
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
 
-    def reset(self):
-        self.data = {}
-        self.tr_code_waiting = None
-        self.rq_name_waiting = None
+    def set_tr_meta(self, rq_name, tr_code, screen_no):
+        """TR 데이터 수신 시 호출되어 메타데이터를 저장하고 이벤트 루프를 종료합니다."""
+        key = f"{rq_name}_{tr_code}_{screen_no}"
+        self.tr_data_meta[key] = {"received": True} # Mark as received
+        logger.debug(f"TR meta received for key: {key}")
+        if self.tr_event_loop.isRunning():
+            self.tr_event_loop.quit()
 
-    def set_tr_data(self, rq_name, tr_code, s_prev_next):
-        """OnReceiveTrData 이벤트에서 호출되어 데이터를 저장하고 루프를 종료합니다."""
-        self.data = {"rq_name": rq_name, "tr_code": tr_code, "s_prev_next": s_prev_next}
-        if self.loop.isRunning():
-            self.loop.quit()
+    def wait_for_tr_data(self, rq_name, tr_code, screen_no, timeout=10):
+        """TR 데이터 요청 후 수신을 기다립니다."""
+        key = f"{rq_name}_{tr_code}_{screen_no}"
+        self.tr_data_meta[key] = {"received": False} # Reset for new request
 
-    def set_condition_version_received(self, status: bool):
-        """조건식 버전 수신 완료 상태를 설정하고 대기 중인 루프를 종료합니다."""
-        self.condition_version_received_flag = status
-        if self.condition_version_loop.isRunning():
-            self.condition_version_loop.quit()
-        logger.info(f"✅ TrEventLoop: 조건식 버전 수신 플래그 설정 완료: {status}.")
+        timeout_timer = QTimer()
+        timeout_timer.setSingleShot(True)
+        timeout_timer.timeout.connect(self.tr_event_loop.quit)
+        timeout_timer.start(timeout * 1000) # Convert seconds to milliseconds
 
-    def wait_for_condition_version(self, timeout_ms: int = 10000) -> bool:
-        """조건식 버전 수신을 기다립니다."""
-        if self.condition_version_received_flag:
-            logger.info("✅ TrEventLoop: 조건식 버전이 이미 수신되었습니다.")
-            return True
+        self.tr_event_loop.exec_()
 
-        logger.info(f"TrEventLoop: 조건식 버전 수신 대기 중 (최대 {timeout_ms}ms)...")
-        self.condition_version_timer.start(timeout_ms)
-        self.condition_version_loop.exec_() # QEventLoop를 사용하여 GUI 스레드에서 대기
-        self.condition_version_timer.stop()
+        timeout_timer.stop() # Stop the timer once event loop quits
 
-        if self.condition_version_received_flag:
-            logger.info("✅ TrEventLoop: 조건식 버전 수신 확인.")
-            return True
+        if self.tr_data_meta[key]["received"]:
+            logger.debug(f"TR data signal received for key: {key}")
+            return True # Signal received
         else:
-            logger.warning("⚠️ TrEventLoop: 조건식 버전 수신 타임아웃.")
+            logger.warning(f"TR data for {key} not signaled within timeout.")
             return False
 
-    def wait(self, timeout_ms=10000):
-        """TR 응답을 기다립니다."""
-        self.timer.start(timeout_ms)
-        self.loop.exec_()
-        self.timer.stop()
-        return self.data is not None and not self.data.get("error")
+    def set_condition_version_received(self, status):
+        """조건식 버전 수신 여부를 설정하고 이벤트 루프를 종료합니다."""
+        self.condition_version_received_flag = status
+        if self.tr_event_loop.isRunning():
+            self.tr_event_loop.quit()
 
-    def get_data(self):
-        return self.data
+    def wait_for_condition_version(self, timeout=10):
+        """조건식 버전 수신을 기다립니다."""
+        self.condition_version_received_flag = False
+        timeout_timer = QTimer()
+        timeout_timer.setSingleShot(True)
+        timeout_timer.timeout.connect(self.tr_event_loop.quit)
+        timeout_timer.start(timeout * 1000)
+
+        self.tr_event_loop.exec_()
+        timeout_timer.stop()
+        return self.condition_version_received_flag
+
+    def set_tr_condition_data(self, stock_code, condition_name, condition_index, search_type, event_type, current_cnt, total_cnt):
+        """TR 조건 검색 결과 수신 시 호출되어 데이터를 저장하고 이벤트 루프를 종료합니다."""
+        key = f"condition_{condition_name}_{condition_index}"
+        self.tr_condition_data[key] = {
+            "stock_code": stock_code,
+            "event_type": event_type,
+            "current_cnt": current_cnt,
+            "total_cnt": total_cnt
+        }
+        logger.debug(f"TR condition data received for key: {key}")
+        if self.tr_event_loop.isRunning():
+            self.tr_event_loop.quit()
+
+    def wait_for_tr_condition_data(self, condition_name, condition_index, timeout=10):
+        """TR 조건 검색 결과 수신을 기다립니다."""
+        key = f"condition_{condition_name}_{condition_index}"
+        self.tr_condition_data[key] = None # Reset for new request
+
+        timeout_timer = QTimer()
+        timeout_timer.setSingleShot(True)
+        timeout_timer.timeout.connect(self.tr_event_loop.quit)
+        timeout_timer.start(timeout * 1000)
+
+        self.tr_event_loop.exec_()
+        timeout_timer.stop()
+
+        return self.tr_condition_data.get(key)

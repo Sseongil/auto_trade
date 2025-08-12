@@ -1,385 +1,1068 @@
 # modules/Kiwoom/kiwoom_query_helper.py
 
+import sys
+import os
 import logging
 import time
-from PyQt5.QtCore import QEventLoop, QTimer, pyqtSignal, QObject
-from modules.common.error_codes import get_error_message
-from modules.common.utils import get_current_time_str
-from modules.common.config import REAL_TIME_FIDS # REALTIME_FID_LIST -> REAL_TIME_FIDS로 수정
+import threading # threading 모듈 임포트 추가
+from PyQt5.QAxContainer import QAxWidget
+from PyQt5.QtCore import QEventLoop, QTimer, pyqtSignal, QObject # pyqtSignal, QObject 임포트 추가
 
+# 로깅 설정
 logger = logging.getLogger(__name__)
 
-class KiwoomQueryHelper(QObject):
-    # TR 응답을 외부에 알리는 시그널
-    tr_response_signal = pyqtSignal(str, dict)
-    # 실시간 조건검색 이벤트를 외부에 알리는 시그널
-    real_condition_signal = pyqtSignal(str, str, str, str) # 종목코드, 편입/이탈, 조건명, 조건인덱스
+# 전역 변수 (필요시 사용, 신중하게 관리)
+_global_kiwoom_tr_request = None
 
-    def __init__(self, ocx, qt_app):
-        super().__init__()
-        self.kiwoom = ocx
-        self.qt_app = qt_app # QApplication 인스턴스 저장
-        self.connected = False
+class KiwoomQueryHelper(QObject): # QObject 상속
+    # 로그인 상태를 외부에 알리기 위한 시그널
+    login_event_signal = pyqtSignal(int, str)
+    # TR 데이터 수신 완료를 외부에 알리기 위한 시그널 (요청명, TR코드, 데이터)
+    tr_data_received_signal = pyqtSignal(str, str, dict)
+
+    def __init__(self):
+        super().__init__() # QObject 초기화
+        self.ocx = QAxWidget("KHOPENAPI.KHOpenAPICtrl.1")
+        self.ocx.OnEventConnect.connect(self._on_event_connect)
+        self.ocx.OnReceiveTrData.connect(self._on_receive_tr_data_internal)
+        self.ocx.OnReceiveMsg.connect(self._on_receive_msg_internal)
+        self.ocx.OnReceiveChejanData.connect(self._on_receive_chejan_data_internal)
+        self.ocx.OnReceiveRealData.connect(self._on_receive_real_data_internal)
+        self.ocx.OnReceiveConditionVer.connect(self._on_receive_condition_ver_internal)
+        self.ocx.OnReceiveTrCondition.connect(self._on_receive_tr_condition_internal)
+        self.ocx.OnReceiveRealCondition.connect(self._on_receive_real_condition_internal)
+
+        # 이벤트 루프 및 플래그 초기화
         self.login_event_loop = QEventLoop()
-        self.tr_event_loops = {}  # 화면번호별 TR 이벤트 루프
-        self.tr_data = {}         # 화면번호별 TR 데이터
-        self.condition_list = {}  # 조건식 목록 (이름: 인덱스)
-        self.real_time_data = {}  # 실시간 데이터를 저장할 딕셔너리 {종목코드: {FID: 값, ...}}
-        self.real_time_screen_no_counter = 5000 # 실시간 데이터용 화면번호 카운터
-        self.condition_screen_no_counter = 6000 # 조건검색 실시간용 화면번호 카운터
-        self.filtered_df = None # 조건 검색을 통해 걸러진 종목들을 저장할 DataFrame
+        self.tr_event_loop = QEventLoop()
+        self.condition_event_loop = QEventLoop() # 조건식 관련 이벤트 루프
+        self.condition_load_success = False # 조건식 로드 성공 여부 플래그
+        self.tr_data = {} # TR 데이터 저장 딕셔너리
+        self.last_tr_error_code = 0 # 마지막 TR 요청 오류 코드
+        self.last_tr_error_msg = "" # 마지막 TR 요청 오류 메시지
 
-        self._set_event_handlers()
-        logger.info(f"{get_current_time_str()}: KiwoomQueryHelper initialized.")
+        # 화면번호 관리 (스레드 안전하게)
+        self.current_screen_no = 1000 # 시작 화면번호
+        self.screen_no_lock = threading.Lock() # 화면번호 생성을 위한 Lock 추가
 
-    def _set_event_handlers(self):
-        """이벤트 핸들러를 설정합니다."""
-        logger.debug("Setting event handlers...")
-        self.kiwoom.OnEventConnect.connect(self._on_event_connect)
-        logger.debug("OnEventConnect connected.")
-        self.kiwoom.OnReceiveTrData.connect(self._on_receive_tr_data)
-        logger.debug("OnReceiveTrData connected.")
-        self.kiwoom.OnReceiveConditionVer.connect(self._on_receive_condition_ver)
-        logger.debug("OnReceiveConditionVer connected.")
-        self.kiwoom.OnReceiveRealCondition.connect(self._on_receive_real_condition)
-        logger.debug("OnReceiveRealCondition connected.") 
-        self.kiwoom.OnReceiveRealData.connect(self._on_receive_real_data) # 실시간 데이터 이벤트 핸들러 연결
-        logger.debug("OnReceiveRealData connected.")
-        # OnReceiveMsg, OnReceiveChejanData는 TradeManager에서 처리하므로 여기서 연결하지 않음
+        # 계좌 정보
+        self.account_number = None
 
-    def connect_kiwoom(self, timeout_ms=20000): # ✅ 타임아웃 20초로 증가
-        """
-        키움 OpenAPI+에 연결을 요청하고 응답을 기다립니다.
-        """
-        if self.kiwoom.dynamicCall("GetConnectState()") == 0:
-            logger.info("🧠 키움 API 연결 요청...")
-            self.kiwoom.dynamicCall("CommConnect()")
-            
-            # QTimer를 사용하여 타임아웃 설정
-            timer = QTimer()
-            timer.setSingleShot(True)
-            timer.timeout.connect(self.login_event_loop.quit)
-            timer.start(timeout_ms)
+        # 조건식 관련
+        self.condition_names = {} # {인덱스: 이름}
 
-            self.login_event_loop.exec_() # 이벤트 루프 시작, 연결 또는 타임아웃까지 대기
-            timer.stop() # 타이머 중지
-
-            if self.connected:
-                logger.info("✅ 키움 API 연결 성공.")
-                return True
-            else:
-                logger.error("❌ 키움 API 연결 실패 또는 타임아웃.")
-                return False
-        else:
-            self.connected = True
-            logger.info("✅ 키움 API 이미 연결됨.")
-            return True
+        logger.info(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: KiwoomQueryHelper initialized.")
 
     def _on_event_connect(self, err_code):
         """
-        키움 OpenAPI+ 연결 상태 변경 시 발생하는 이벤트 핸들러.
+        키움증권 API 연결 상태 수신 이벤트
         """
         if err_code == 0:
-            self.connected = True
-            logger.info("✅ CommConnect 연결 성공.")
+            msg = "정상 처리"
+            logger.info(f"[로그인 이벤트] 코드: {err_code}, 메시지: {msg}")
+            self.login_event_signal.emit(err_code, msg)
         else:
-            self.connected = False
-            error_msg = get_error_message(err_code)
-            logger.error(f"❌ CommConnect 연결 실패: {error_msg} (에러 코드: {err_code})")
-        
-        if self.login_event_loop.isRunning():
-            self.login_event_loop.quit() # 이벤트 루프 종료
+            msg = f"로그인 실패: {self._get_error_message(err_code)}"
+            logger.error(f"[로그인 이벤트] 코드: {err_code}, 메시지: {msg}")
+            self.login_event_signal.emit(err_code, msg)
+        self.login_event_loop.exit() # 이벤트 루프 종료
 
-    def set_tr_response_event(self, screen_no):
-        """TR 응답 대기 이벤트를 설정합니다."""
-        self.tr_event_loops[screen_no] = QEventLoop()
-        self.tr_data[screen_no] = {"single_data": {}, "multi_data": [], "error": None}
+    def _on_receive_tr_data_internal(self, screen_no, rq_name, tr_code, record_name,
+                                      data_len, err_code, msg, srv_item_cnt):
+        """
+        TR 데이터를 수신하는 내부 이벤트 핸들러
+        """
+        logger.info(f"[내부 OnReceiveTrData] ScreenNo: {screen_no}, RqName: {rq_name}, TrCode: {tr_code}")
+        self.last_tr_error_code = err_code
+        self.last_tr_error_msg = msg
 
-    def wait_for_tr_response(self, screen_no, timeout_ms=10000):
-        """TR 응답을 기다립니다."""
-        if screen_no not in self.tr_event_loops:
-            logger.error(f"❌ TR 응답 대기 이벤트가 설정되지 않았습니다: {screen_no}")
-            return False
+        # TR 코드에 따라 데이터 파싱 및 저장
+        if tr_code == "OPW00001": # 계좌평가현황요청
+            self.tr_data[rq_name] = {
+                "예수금": self.GetCommData(tr_code, rq_name, 0, "예수금"),
+                "출금가능금액": self.GetCommData(tr_code, rq_name, 0, "출금가능금액"),
+                "총평가금액": self.GetCommData(tr_code, rq_name, 0, "총평가금액"),
+                "총평가손익금액": self.GetCommData(tr_code, rq_name, 0, "총평가손익금액"),
+                "총수익률": self.GetCommData(tr_code, rq_name, 0, "총수익률(%)")
+            }
+        elif tr_code == "OPT10001": # 주식기본정보요청
+            self.tr_data[rq_name] = {
+                "현재가": self.GetCommData(tr_code, rq_name, 0, "현재가"),
+                "거래량": self.GetCommData(tr_code, rq_name, 0, "거래량"),
+                "시가": self.GetCommData(tr_code, rq_name, 0, "시가"),
+                "고가": self.GetCommData(tr_code, rq_name, 0, "고가"),
+                "저가": self.GetCommData(tr_code, rq_name, 0, "저가")
+            }
+        elif tr_code == "OPW00018": # 계좌평가잔고내역요청
+            # 멀티 데이터 처리
+            cnt = self.GetRepeatCnt(tr_code, rq_name)
+            positions = []
+            for i in range(cnt):
+                positions.append({
+                    "종목코드": self.GetCommData(tr_code, rq_name, i, "종목코드").strip(),
+                    "종목명": self.GetCommData(tr_code, rq_name, i, "종목명").strip(),
+                    "보유수량": int(self.GetCommData(tr_code, rq_name, i, "보유수량")),
+                    "매입가": int(self.GetCommData(tr_code, rq_name, i, "매입가")),
+                    "현재가": int(self.GetCommData(tr_code, rq_name, i, "현재가")),
+                    "평가손익": int(self.GetCommData(tr_code, rq_name, i, "평가손익")),
+                    "수익률": float(self.GetCommData(tr_code, rq_name, i, "수익률(%)"))
+                })
+            self.tr_data[rq_name] = positions
+        # 필요한 다른 TR 코드에 대한 처리 추가
 
-        timer = QTimer()
-        timer.setSingleShot(True)
-        timer.timeout.connect(self.tr_event_loops[screen_no].quit)
-        timer.start(timeout_ms)
+        self.tr_data_received_signal.emit(rq_name, tr_code, self.tr_data.get(rq_name, {}))
+        self.tr_event_loop.exit() # 이벤트 루프 종료
 
-        self.tr_event_loops[screen_no].exec_() # 이벤트 루프 시작
-        timer.stop()
+    def _on_receive_msg_internal(self, screen_no, rq_name, tr_code, msg):
+        """
+        TR 요청에 대한 메시지를 수신하는 내부 이벤트 핸들러
+        """
+        logger.info(f"[내부 OnReceiveMsg] ScreenNo: {screen_no}, RqName: {rq_name}, TrCode: {tr_code}, Msg: {msg}")
 
-        # 타임아웃으로 종료되었는지 확인
-        if self.tr_data[screen_no].get("error") == "Timeout":
+    def _on_receive_chejan_data_internal(self, gubun, item_cnt, fid_list):
+        """
+        체결, 잔고 변경 등 실시간 체결 데이터를 수신하는 내부 이벤트 핸들러
+        """
+        logger.info(f"[내부 OnReceiveChejanData] Gubun: {gubun}, ItemCnt: {item_cnt}, FidList: {fid_list}")
+        # TradeManager에서 이 이벤트를 처리하도록 위임
+
+    def _on_receive_real_data_internal(self, stock_code, real_type, real_data):
+        """
+        실시간 데이터를 수신하는 내부 이벤트 핸들러
+        """
+        # logger.debug(f"[내부 OnReceiveRealData] 종목코드: {stock_code}, 실시간타입: {real_type}, 실시간데이터: {real_data}")
+        pass # MonitorPositions에서 이 이벤트를 처리하도록 위임
+
+    def _on_receive_condition_ver_internal(self, ret, msg):
+        """
+        조건식 목록 수신 이벤트
+        """
+        logger.info(f"[내부 OnReceiveConditionVer] Ret: {ret}, Msg: {msg}")
+        if str(ret) == "1": # 성공
+            self.condition_load_success = True
+            condition_list = self.GetConditionNameList()
+            if condition_list:
+                for item in condition_list.split(';'):
+                    if item:
+                        parts = item.split('^')
+                        if len(parts) == 2:
+                            index = int(parts[0])
+                            name = parts[1]
+                            self.condition_names[index] = name
+            logger.info(f"✅ 조건식 목록 로드 성공: {self.condition_names}")
+        else:
+            self.condition_load_success = False
+            logger.error(f"❌ 조건식 목록 로드 실패: {msg}")
+        self.condition_event_loop.exit()
+
+    def _on_receive_tr_condition_internal(self, screen_no, stock_list, condition_name, condition_index, search_type):
+        """
+        조건검색 종목 진입/이탈 통보 (TR 조건검색)
+        """
+        logger.info(f"[내부 OnReceiveTrCondition] 화면번호: {screen_no}, 종목리스트: {stock_list}, 조건식명: {condition_name}, 인덱스: {condition_index}, 검색구분: {search_type}")
+        # 이 이벤트는 주로 TR 조건검색에 사용되며, 실시간 조건검색은 OnReceiveRealCondition에서 처리
+
+    def _on_receive_real_condition_internal(self, stock_code, condition_name, condition_index, invest_gubun):
+        """
+        실시간 조건검색 편입/이탈 종목을 수신하는 내부 이벤트 핸들러
+        """
+        logger.info(f"[내부 OnReceiveRealCondition] 종목코드: {stock_code}, 조건식: {condition_name}, 인덱스: {condition_index}, 구분: {invest_gubun}")
+        # RealTimeConditionManager에서 이 이벤트를 처리하도록 위임
+
+    def connect_kiwoom(self):
+        """
+        키움증권 API에 연결 요청
+        """
+        logger.info("✅ Kiwoom API 연결 요청 전송. 로그인 이벤트 대기 중...")
+        self.ocx.CommConnect()
+        self.login_event_loop.exec_() # 로그인 이벤트가 발생할 때까지 대기
+
+    def get_login_info(self, tag):
+        """
+        로그인 정보를 반환
+        :param tag: "ACCNO" (계좌번호), "USER_ID" (사용자 ID), "USER_NAME" (사용자 이름) 등
+        """
+        return self.ocx.GetLoginInfo(tag)
+
+    def get_account_numbers(self):
+        """
+        사용자 계좌번호 목록을 반환
+        """
+        account_list = self.ocx.GetLoginInfo("ACCNO")
+        return account_list.split(';')[:-1] # 마지막 빈 문자열 제거
+
+    def set_input_value(self, id, value):
+        """
+        TR 요청에 필요한 입력 값 설정
+        """
+        self.ocx.SetInputValue(id, value)
+
+    def comm_rq_data(self, rq_name, tr_code, prev_next, screen_no):
+        """
+        TR 요청 전송
+        """
+        logger.info(f"🚀 CommRqData 요청: RqName={rq_name}, TrCode={tr_code}, PrevNext={prev_next}, ScreenNo={screen_no}")
+        self.tr_data = {} # TR 데이터 초기화
+        self.last_tr_error_code = 0
+        self.last_tr_error_msg = ""
+        ret = self.ocx.CommRqData(rq_name, tr_code, prev_next, screen_no)
+        if ret != 0:
+            error_msg = self._get_error_message(ret)
+            logger.error(f"❌ CommRqData 요청 실패: {error_msg} (에러코드: {ret})")
             return False
         return True
 
-    def get_tr_data(self, screen_no):
-        """저장된 TR 데이터를 반환합니다."""
-        data = self.tr_data.get(screen_no)
-        # 데이터 사용 후 초기화 (선택 사항, 재사용 방지)
-        # self.tr_data[screen_no] = {"single_data": {}, "multi_data": [], "error": None}
-        return data
-
-    def _on_receive_tr_data(self, screen_no, rq_name, tr_code, record_name, s_prev_next):
+    def get_comm_data(self, tr_code, record_name, index, item_name):
         """
-        TR 데이터 수신 시 발생하는 이벤트 핸들러.
+        수신된 TR 데이터 중 특정 항목의 값을 반환
         """
-        logger.debug(f"TR 데이터 수신: 화면번호={screen_no}, 요청이름={rq_name}, TR코드={tr_code}")
-        
-        # 단일 데이터 처리
-        single_data = {}
-        # opt10081 (일봉) TR은 GetCommData 대신 GetCommDataEx를 사용
-        if tr_code == "opt10081":
-            # 일봉 데이터는 멀티 데이터로만 존재
-            pass 
-        else:
-            # 그 외 TR (예: opw00001, opw00018의 단일 데이터)
-            # GetCommData(TR코드, 레코드명, 인덱스, 아이템이름)
-            item_names = {
-                "opw00001": ["예수금"],
-                "opw00018": ["총매입금", "총평가금액", "총평가손익금액", "총수익률(%)", "추정예탁자산"]
-            }
-            for item_name in item_names.get(tr_code, []):
-                data = self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, record_name, 0, item_name)
-                single_data[item_name] = data.strip()
-            self.tr_data[screen_no]["single_data"] = single_data
+        data = self.ocx.GetCommData(tr_code, record_name, index, item_name)
+        return data.strip() # 공백 제거하여 반환
 
-        # 멀티 데이터 처리
-        multi_data = []
-        # GetRepeatCnt(TR코드, 레코드명)
-        count = self.kiwoom.dynamicCall("GetRepeatCnt(QString, QString)", tr_code, rq_name) # rq_name으로 변경
-        
-        # TR 코드에 따라 멀티 데이터 필드 정의
-        if tr_code == "opt10081": # 일봉 데이터
-            # "일자", "현재가", "거래량", "시가", "고가", "저가"
-            fields = ["일자", "현재가", "거래량", "시가", "고가", "저가", "전일대비", "등락률", "거래원", "개인", "기관", "외인(소진율)", "외인", "상한가", "하한가", "기준가", "시가총액", "고가율", "저가율", "거래대금", "체결강도"]
-        elif tr_code == "opw00018": # 보유 종목 데이터
-            # "종목번호", "종목명", "보유수량", "매입가", "현재가", "평가손익", "수익률(%)", "매매가능수량"
-            fields = ["종목번호", "종목명", "보유수량", "매입가", "현재가", "평가손익", "수익률(%)", "매매가능수량", "당일매수수량", "당일매도수량", "매입금액", "매매수수료", "매도세금"]
-        else:
-            fields = [] # 다른 TR에 대한 필드는 여기에 추가
-
-        for i in range(count):
-            row_data = {}
-            for field in fields:
-                data = self.kiwoom.dynamicCall("GetCommData(QString, QString, int, QString)", tr_code, record_name, i, field)
-                row_data[field] = data.strip()
-            multi_data.append(row_data)
-        self.tr_data[screen_no]["multi_data"] = multi_data
-        
-        # 다음 페이지 유무 (s_prev_next)
-        self.tr_data[screen_no]["s_prev_next"] = s_prev_next
-
-        # 이벤트 루프 종료
-        if screen_no in self.tr_event_loops and self.tr_event_loops[screen_no].isRunning():
-            self.tr_event_loops[screen_no].quit()
-
-    def _on_receive_condition_ver(self, ret, msg):
+    def get_repeat_cnt(self, tr_code, record_name):
         """
-        조건식 버전 수신 시 발생하는 이벤트 핸들러.
+        멀티 데이터의 반복 횟수를 반환
         """
-        logger.info(f"조건식 버전 수신: {msg} (코드: {ret})")
-        if ret == 1: # 성공
-            self._get_condition_list_from_server() # 서버에서 조건식 목록 가져오기
-        else:
-            logger.error("❌ 조건식 버전 확인 실패.")
-        
-        # 조건식 버전 이벤트 루프가 실행 중이면 종료
-        if hasattr(self, 'condition_ver_event_loop') and self.condition_ver_event_loop.isRunning():
-            self.condition_ver_event_loop.quit()
+        return self.ocx.GetRepeatCnt(tr_code, record_name)
 
-    def _get_condition_list_from_server(self):
+    def send_order(self, rq_name, screen_no, account_no, order_type, stock_code, quantity, price, trade_type, org_order_no):
         """
-        서버에 저장된 조건식 목록을 요청합니다.
+        주식 주문 전송
+        :param rq_name: 요청명
+        :param screen_no: 화면번호
+        :param account_no: 계좌번호
+        :param order_type: 주문유형 (1:신규매수, 2:신규매도, 3:매수취소, 4:매도취소, 5:매수정정, 6:매도정정)
+        :param stock_code: 종목코드
+        :param quantity: 수량
+        :param price: 가격
+        :param trade_type: 거래구분 (00:지정가, 03:시장가 등)
+        :param org_order_no: 원주문번호 (정정/취소 시 사용)
+        :return: 주문번호 (성공 시), None (실패 시)
         """
-        logger.info("🧠 서버에서 조건식 목록 요청...")
-        self.kiwoom.dynamicCall("GetConditionLoad()")
-        # GetConditionLoad()는 OnReceiveConditionVer 이벤트를 발생시키지 않습니다.
-        # 대신, 이 호출 이후 GetConditionNameList()를 통해 즉시 목록을 가져올 수 있습니다.
-        # 따라서 별도의 이벤트 루프 대기는 필요 없습니다.
-        self._parse_condition_name_list()
-
-
-    def _parse_condition_name_list(self):
-        """
-        GetConditionLoad() 호출 후 조건식 목록을 파싱합니다.
-        """
-        data = self.kiwoom.dynamicCall("GetConditionNameList()")
-        if data == "":
-            logger.warning("⚠️ 서버에 저장된 조건식이 없습니다.")
-            self.condition_list = {}
-            return
-
-        condition_list_raw = data.split(";")
-        self.condition_list = {}
-        for item in condition_list_raw:
-            if item:
-                parts = item.split("^")
-                if len(parts) == 2:
-                    index = int(parts[0])
-                    name = parts[1]
-                    self.condition_list[name] = index
-        logger.info(f"✅ 조건식 목록 로드 완료: {len(self.condition_list)}개")
-        for name, index in self.condition_list.items():
-            logger.debug(f"  - {name} (인덱스: {index})")
-
-    def get_condition_list(self):
-        """
-        현재 로드된 조건식 목록을 반환합니다.
-        없으면 서버에서 로드를 시도합니다.
-        """
-        if not self.condition_list:
-            logger.info("조건식 목록이 비어 있습니다. 서버에서 로드를 시도합니다.")
-            self._get_condition_list_from_server() # 조건식 목록 로드 시도
-            # 로드 후에도 비어있을 수 있으므로 다시 확인
-            if not self.condition_list:
-                logger.warning("⚠️ 조건식 목록 로드 실패 또는 서버에 조건식이 없습니다.")
-        return self.condition_list
-
-    def generate_real_time_screen_no(self):
-        """실시간 데이터 요청용 고유 화면번호를 생성합니다."""
-        self.real_time_screen_no_counter += 1
-        if self.real_time_screen_no_counter > 5999: # 5000번대 사용
-            self.real_time_screen_no_counter = 5000
-        return str(self.real_time_screen_no_counter)
-
-    def generate_condition_screen_no(self):
-        """조건 검색 실시간 요청용 고유 화면번호를 생성합니다."""
-        self.condition_screen_no_counter += 1
-        if self.condition_screen_no_counter > 6999: # 6000번대 사용
-            self.condition_screen_no_counter = 6000
-        return str(self.condition_screen_no_counter)
-
-    def SetRealReg(self, screen_no, stock_code, fid_list, real_type):
-        """
-        실시간 데이터 등록.
-        """
-        logger.info(f"🧠 실시간 데이터 등록 요청: 화면번호={screen_no}, 종목코드={stock_code}, FID={fid_list}, 타입={real_type}")
-        ret = self.kiwoom.dynamicCall("SetRealReg(QString, QString, QString, QString)", screen_no, stock_code, fid_list, real_type)
+        logger.info(f"📦 주문 전송 요청: {rq_name}, 화면: {screen_no}, 계좌: {account_no}, 종목: {stock_code}, 수량: {quantity}, 가격: {price}, 구분: {trade_type}")
+        ret = self.ocx.SendOrder(rq_name, screen_no, account_no, order_type, stock_code, quantity, price, trade_type, org_order_no)
         if ret == 0:
-            logger.info(f"✅ 실시간 데이터 등록 성공: {stock_code}")
-            return True
+            # SendOrder 성공 시 주문번호를 반환
+            order_no = self.ocx.GetCommData("OPT10076", "주문번호", 0, "주문번호") # 예시: 주문번호는 체결통보에서 확인하는 것이 일반적
+            logger.info(f"✅ SendOrder 성공. 반환값: {ret}")
+            return order_no # 실제 주문번호는 체결통보에서 확인하는 것이 정확
         else:
-            error_msg = get_error_message(ret)
-            logger.error(f"❌ 실시간 데이터 등록 실패 ({stock_code}): {error_msg}")
-            return False
+            error_msg = self._get_error_message(ret)
+            logger.error(f"❌ SendOrder 실패: {error_msg} (에러코드: {ret})")
+            return None
 
-    def SetRealRemove(self, screen_no, stock_code="ALL"):
+    def get_chejan_data(self, fid):
         """
-        실시간 데이터 해제.
+        체결 데이터 수신 시 FID에 해당하는 값 반환
         """
-        logger.info(f"� 실시간 데이터 해제 요청: 화면번호={screen_no}, 종목코드={stock_code}")
-        self.kiwoom.dynamicCall("SetRealRemove(QString, QString)", screen_no, stock_code)
-        logger.info(f"✅ 실시간 데이터 해제 완료: 화면번호={screen_no}, 종목코드={stock_code}")
+        return self.ocx.GetChejanData(fid).strip()
 
-    def _on_receive_real_data(self, stock_code, real_type, real_data):
+    def get_master_code_name(self, stock_code):
         """
-        실시간 데이터 수신 시 발생하는 이벤트 핸들러.
+        종목코드에 해당하는 종목명을 반환
         """
-        # logger.debug(f"실시간 데이터 수신: 종목={stock_code}, 타입={real_type}, 데이터={real_data}")
-        
-        # 현재가, 등락률, 체결강도 등 필요한 FID 값들을 가져와 저장
-        # CommGetData(실시간 타입, FID)
-        
-        # '주식체결' (real_type: "주식체결")
-        if real_type == "주식체결":
-            current_price_str = self.kiwoom.dynamicCall("GetCommRealData(QString, int)", real_type, 10).strip() # 현재가
-            current_price = int(current_price_str.replace('+', '').replace('-', '')) # 부호 제거 후 정수 변환
-            
-            daily_change_str = self.kiwoom.dynamicCall("GetCommRealData(QString, int)", real_type, 11).strip() # 전일대비
-            daily_change = int(daily_change_str.replace('+', '').replace('-', ''))
-            
-            daily_change_pct_str = self.kiwoom.dynamicCall("GetCommRealData(QString, int)", real_type, 12).strip() # 등락률
-            daily_change_pct = float(daily_change_pct_str)
-            
-            total_volume_str = self.kiwoom.dynamicCall("GetCommRealData(QString, int)", real_type, 13).strip() # 누적거래량
-            total_volume = int(total_volume_str)
+        return self.ocx.GetMasterCodeName(stock_code).strip()
 
-            chegyul_gangdo_str = self.kiwoom.dynamicCall("GetCommRealData(QString, int)", real_type, 228).strip() # 체결강도
-            chegyul_gangdo = float(chegyul_gangdo_str) if chegyul_gangdo_str else 0.0
-
-            total_buy_cvol_str = self.kiwoom.dynamicCall("GetCommRealData(QString, int)", real_type, 290).strip() # 매수체결량
-            total_buy_cvol = int(total_buy_cvol_str) if total_buy_cvol_str else 0
-
-            total_sell_cvol_str = self.kiwoom.dynamicCall("GetCommRealData(QString, int)", real_type, 291).strip() # 매도체결량
-            total_sell_cvol = int(total_sell_cvol_str) if total_sell_cvol_str else 0
-            
-            self.real_time_data[stock_code] = {
-                "current_price": current_price,
-                "daily_change": daily_change,
-                "daily_change_pct": daily_change_pct,
-                "total_volume": total_volume,
-                "chegyul_gangdo": chegyul_gangdo,
-                "total_buy_cvol": total_buy_cvol,
-                "total_sell_cvol": total_sell_cvol,
-                "timestamp": get_current_time_str()
-            }
-            # logger.debug(f"실시간 데이터 업데이트 [{stock_code}]: 현재가={current_price}, 체결강도={chegyul_gangdo:.2f}")
-
-    def SendCondition(self, screen_no, condition_name, condition_index, search_type):
+    def get_condition_name_list(self):
         """
-        조건식 실시간 검색을 요청합니다.
-        search_type: 0 (일반조회), 1 (실시간조회)
+        저장된 조건식 목록을 반환 (인덱스^이름;인덱스^이름;...)
         """
-        logger.info(f"🧠 조건식 검색 요청: 화면번호={screen_no}, 조건명='{condition_name}', 인덱스={condition_index}, 타입={search_type}")
-        ret = self.kiwoom.dynamicCall("SendCondition(QString, QString, int, int)", 
-                                      screen_no, condition_name, condition_index, search_type)
+        return self.ocx.GetConditionNameList().strip()
+
+    def send_condition(self, screen_no, condition_name, condition_index, search_type):
+        """
+        조건검색을 요청하거나 중지합니다.
+        :param screen_no: 화면번호
+        :param condition_name: 조건식 이름
+        :param condition_index: 조건식 인덱스
+        :param search_type: 0: 조건검색 요청, 1: 조건검색 해제
+        """
+        logger.info(f"🔍 조건검색 요청: 화면={screen_no}, 이름='{condition_name}', 인덱스={condition_index}, 타입={search_type}")
+        ret = self.ocx.SendCondition(screen_no, condition_name, condition_index, search_type)
         if ret == 1: # 성공
-            logger.info(f"✅ 조건식 검색 요청 성공: '{condition_name}'")
+            logger.info(f"✅ SendCondition 성공: {condition_name}")
             return True
         else:
-            error_msg = get_error_message(ret)
-            logger.error(f"❌ 조건식 검색 요청 실패 ({condition_name}): {error_msg}")
+            logger.error(f"❌ SendCondition 실패 (에러코드: {ret})")
             return False
 
-    def SendConditionStop(self, screen_no, condition_name, condition_index):
+    def comm_kw_rq_data(self, arr_code, prev_next, code_count, rq_name, screen_no):
         """
-        조건식 실시간 검색을 중지합니다.
+        복수 종목에 대한 TR 요청 (예: 시세조회)
         """
-        logger.info(f"🧠 조건식 검색 중지 요청: 화면번호={screen_no}, 조건명='{condition_name}', 인덱스={condition_index}")
-        self.kiwoom.dynamicCall("SendConditionStop(QString, QString, int)", 
-                                screen_no, condition_name, condition_index)
-        logger.info(f"✅ 조건식 검색 중지 완료: '{condition_name}'")
+        logger.info(f"📊 CommKwRqData 요청: 종목코드={arr_code}, PrevNext={prev_next}, Count={code_count}, RqName={rq_name}, ScreenNo={screen_no}")
+        ret = self.ocx.CommKwRqData(arr_code, prev_next, code_count, rq_name, screen_no)
+        if ret != 0:
+            error_msg = self._get_error_message(ret)
+            logger.error(f"❌ CommKwRqData 요청 실패: {error_msg} (에러코드: {ret})")
+            return False
+        return True
 
-    def _on_receive_real_condition(self, stock_code, event_type, condition_name, condition_index):
+    def get_comm_real_data(self, fid):
         """
-        실시간 조건검색 종목 편입/이탈 시 발생하는 이벤트 핸들러.
+        실시간 데이터 수신 시 FID에 해당하는 값 반환
         """
-        logger.debug(f"실시간 조건 수신: 종목={stock_code}, 타입={event_type}, 조건명={condition_name}, 인덱스={condition_index}")
-        # 이 시그널을 RealTimeConditionManager로 전달
-        self.real_condition_signal.emit(stock_code, event_type, condition_name, condition_index)
+        return self.ocx.GetCommRealData(fid).strip()
 
-    def get_stock_name(self, stock_code):
+    def set_real_reg(self, screen_no, code_list, fid_list, opt_type):
         """
-        종목코드로 종목명을 반환합니다.
+        실시간 데이터 등록
+        :param screen_no: 화면번호
+        :param code_list: 종목코드 목록 (세미콜론으로 구분)
+        :param fid_list: FID 목록 (세미콜론으로 구분)
+        :param opt_type: 0: 등록, 1: 해제
         """
-        return self.kiwoom.dynamicCall("GetMasterCodeName(QString)", stock_code).strip()
+        logger.info(f"⏰ 실시간 데이터 등록/해제: 화면={screen_no}, 종목={code_list}, FID={fid_list}, 타입={opt_type}")
+        ret = self.ocx.SetRealReg(screen_no, code_list, fid_list, opt_type)
+        if ret == 0:
+            logger.info(f"✅ SetRealReg 성공.")
+            return True
+        else:
+            logger.error(f"❌ SetRealReg 실패 (에러코드: {ret})")
+            return False
 
-    def get_code_list_by_market(self, market_code):
+    def disconnect_real_data(self, screen_no):
         """
-        시장별 종목코드를 반환합니다.
+        화면번호에 할당된 실시간 데이터 연결을 해제
         """
-        data = self.kiwoom.dynamicCall("GetCodeListByMarket(QString)", market_code)
-        codes = data.split(';')
-        return [code.strip() for code in codes if code.strip()]
+        logger.info(f"❌ 실시간 데이터 연결 해제: 화면={screen_no}")
+        self.ocx.DisconnectRealData(screen_no)
 
-    def get_stock_state(self, stock_code):
+    def generate_screen_no(self):
         """
-        종목코드로 종목 상태를 반환합니다. (예: 관리종목, 투자주의 등)
+        화면번호를 생성하고 반환합니다.
+        동시에 여러 TR 요청이 발생할 경우 화면번호 중복을 피하기 위해 Lock을 사용합니다.
         """
-        # GetMasterStockState는 종목 상태 문자열을 반환합니다.
-        return self.kiwoom.dynamicCall("GetMasterStockState(QString)", stock_code).strip()
+        with self.screen_no_lock: # 수정된 부분: self.screen_no_lock 사용
+            screen_no = str(self.current_screen_no).zfill(4) # 4자리 문자열로 포맷팅
+            self.current_screen_no += 1
+            if self.current_screen_no > 9999: # 화면번호 범위 초과 시 초기화 (0000-9999)
+                self.current_screen_no = 1000
+            logger.debug(f"화면번호 생성: {screen_no}")
+            return screen_no
 
-    def get_current_price(self, stock_code):
+    def _get_error_message(self, err_code):
         """
-        실시간 데이터에서 현재가를 가져오거나, 없으면 TR로 조회합니다.
+        키움증권 API 에러 코드를 메시지로 변환
         """
-        # 실시간 데이터에 현재가가 있으면 사용
-        if stock_code in self.real_time_data and self.real_time_data[stock_code].get("current_price") is not None:
-            return self.real_time_data[stock_code]["current_price"]
-        
-        # 실시간 데이터가 없으면 TR 요청 (GetCommRealData는 실시간 등록된 종목만 가능)
-        # TR 요청은 KiwoomTrRequest에서 담당하므로, 여기서는 직접 호출하지 않고 0을 반환합니다.
-        logger.debug(f"현재가 정보 없음 (실시간 데이터): {stock_code}")
-        return 0
+        error_messages = {
+            -100: "사용자 정보교환 실패",
+            -101: "접속 서버 선택 실패",
+            -102: "버전처리 실패",
+            -103: "개인방화벽 실패",
+            -104: "프로그램 실행 실패",
+            -105: "버전 정보가 없습니다.",
+            -106: "파일이 없습니다.",
+            -107: "업데이트 실패",
+            -200: "시세조회 과부하",
+            -201: "TR요청 과부하",
+            -202: "주문요청 과부하",
+            -300: "입력값 오류",
+            -301: "계좌비밀번호 없음",
+            -302: "기타 오류",
+            -303: "종목코드 없음",
+            -304: "요청 전문 작성 실패",
+            -305: "주문가격이 만원 단위가 아닙니다.",
+            -306: "주문수량이 1주 이상이 아닙니다.",
+            -307: "주문수량이 5만주 이상이 아닙니다.",
+            -308: "주문수량이 10만주 이상이 아닙니다.",
+            -309: "주문수량이 50만주 이상이 아닙니다.",
+            -310: "주문수량이 100만주 이상이 아닙니다.",
+            -311: "주문수량이 500만주 이상이 아닙니다.",
+            -312: "주문수량이 1000만주 이상이 아닙니다.",
+            -313: "주문수량이 5천만주 이상이 아닙니다.",
+            -314: "주문수량이 1억주 이상이 아닙니다.",
+            -315: "주문수량이 5억주 이상이 아닙니다.",
+            -316: "주문수량이 10억주 이상이 아닙니다.",
+            -317: "주문수량이 50억주 이상이 아닙니다.",
+            -318: "주문수량이 100억주 이상이 아닙니다.",
+            -319: "주문수량이 500억주 이상이 아닙니다.",
+            -320: "주문수량이 1000억주 이상이 아닙니다.",
+            -321: "주문수량이 5천억주 이상이 아닙니다.",
+            -322: "주문수량이 1조주 이상이 아닙니다.",
+            -323: "주문수량이 5조주 이상이 아닙니다.",
+            -324: "주문수량이 10조주 이상이 아닙니다.",
+            -325: "주문수량이 50조주 이상이 아닙니다.",
+            -326: "주문수량이 100조주 이상이 아닙니다.",
+            -327: "주문수량이 500조주 이상이 아닙니다.",
+            -328: "주문수량이 1000조주 이상이 아닙니다.",
+            -329: "주문수량이 5천조주 이상이 아닙니다.",
+            -330: "주문수량이 1경주 이상이 아닙니다.",
+            -331: "주문수량이 5경주 이상이 아닙니다.",
+            -332: "주문수량이 10경주 이상이 아닙니다.",
+            -333: "주문수량이 50경주 이상이 아닙니다.",
+            -334: "주문수량이 100경주 이상이 아닙니다.",
+            -335: "주문수량이 500경주 이상이 아닙니다.",
+            -336: "주문수량이 1000경주 이상이 아닙니다.",
+            -337: "주문수량이 5천경주 이상이 아닙니다.",
+            -338: "주문수량이 1만경주 이상이 아닙니다.",
+            -339: "주문수량이 5만경주 이상이 아닙니다.",
+            -340: "주문수량이 10만경주 이상이 아닙니다.",
+            -341: "주문수량이 50만경주 이상이 아닙니다.",
+            -342: "주문수량이 100만경주 이상이 아닙니다.",
+            -343: "주문수량이 500만경주 이상이 아닙니다.",
+            -344: "주문수량이 1000만경주 이상이 아닙니다.",
+            -345: "주문수량이 5천만경주 이상이 아닙니다.",
+            -346: "주문수량이 1억경주 이상이 아닙니다.",
+            -347: "주문수량이 5억경주 이상이 아닙니다.",
+            -348: "주문수량이 10억경주 이상이 아닙니다.",
+            -349: "주문수량이 50억경주 이상이 아닙니다.",
+            -350: "주문수량이 100억경주 이상이 아닙니다.",
+            -351: "주문수량이 500억경주 이상이 아닙니다.",
+            -352: "주문수량이 1000억경주 이상이 아닙니다.",
+            -353: "주문수량이 5천억경주 이상이 아닙니다.",
+            -354: "주문수량이 1조경주 이상이 아닙니다.",
+            -355: "주문수량이 5조경주 이상이 아닙니다.",
+            -356: "주문수량이 10조경주 이상이 아닙니다.",
+            -357: "주문수량이 50조경주 이상이 아닙니다.",
+            -358: "주문수량이 100조경주 이상이 아닙니다.",
+            -359: "주문수량이 500조경주 이상이 아닙니다.",
+            -360: "주문수량이 1000조경주 이상이 아닙니다.",
+            -361: "주문수량이 5천조경주 이상이 아닙니다.",
+            -362: "주문수량이 1경경주 이상이 아닙니다.",
+            -363: "주문수량이 5경경주 이상이 아닙니다.",
+            -364: "주문수량이 10경경주 이상이 아닙니다.",
+            -365: "주문수량이 50경경주 이상이 아닙니다.",
+            -366: "주문수량이 100경경주 이상이 아닙니다.",
+            -367: "주문수량이 500경경주 이상이 아닙니다.",
+            -368: "주문수량이 1000경경주 이상이 아닙니다.",
+            -369: "주문수량이 5천경경주 이상이 아닙니다.",
+            -370: "주문수량이 1만경경주 이상이 아닙니다.",
+            -371: "주문수량이 5만경경주 이상이 아닙니다.",
+            -372: "주문수량이 10만경경주 이상이 아닙니다.",
+            -373: "주문수량이 50만경경주 이상이 아닙니다.",
+            -374: "주문수량이 100만경경주 이상이 아닙니다.",
+            -375: "주문수량이 500만경경주 이상이 아닙니다.",
+            -376: "주문수량이 1000만경경주 이상이 아닙니다.",
+            -377: "주문수량이 5천만경경주 이상이 아닙니다.",
+            -378: "주문수량이 1억경경주 이상이 아닙니다.",
+            -379: "주문수량이 5억경경주 이상이 아닙니다.",
+            -380: "주문수량이 10억경경주 이상이 아닙니다.",
+            -381: "주문수량이 50억경경주 이상이 아닙니다.",
+            -382: "주문수량이 100억경경주 이상이 아닙니다.",
+            -383: "주문수량이 500억경경주 이상이 아닙니다.",
+            -384: "주문수량이 1000억경경주 이상이 아닙니다.",
+            -385: "주문수량이 5천억경경주 이상이 아닙니다.",
+            -386: "주문수량이 1조경경주 이상이 아닙니다.",
+            -387: "주문수량이 5조경경주 이상이 아닙니다.",
+            -388: "주문수량이 10조경경주 이상이 아닙니다.",
+            -389: "주문수량이 50조경경주 이상이 아닙니다.",
+            -390: "주문수량이 100조경경주 이상이 아닙니다.",
+            -391: "주문수량이 500조경경주 이상이 아닙니다.",
+            -392: "주문수량이 1000조경경주 이상이 아닙니다.",
+            -393: "주문수량이 5천조경경주 이상이 아닙니다.",
+            -394: "주문수량이 1경경경주 이상이 아닙니다.",
+            -395: "주문수량이 5경경경주 이상이 아닙니다.",
+            -396: "주문수량이 10경경경주 이상이 아닙니다.",
+            -397: "주문수량이 50경경경주 이상이 아닙니다.",
+            -398: "주문수량이 100경경경주 이상이 아닙니다.",
+            -399: "주문수량이 500경경경주 이상이 아닙니다.",
+            -400: "주문수량이 1000경경경주 이상이 아닙니다.",
+            -401: "주문수량이 5천경경경주 이상이 아닙니다.",
+            -402: "주문수량이 1만경경경주 이상이 아닙니다.",
+            -403: "주문수량이 5만경경경주 이상이 아닙니다.",
+            -404: "주문수량이 10만경경경주 이상이 아닙니다.",
+            -405: "주문수량이 50만경경경주 이상이 아닙니다.",
+            -406: "주문수량이 100만경경경주 이상이 아닙니다.",
+            -407: "주문수량이 500만경경경주 이상이 아닙니다.",
+            -408: "주문수량이 1000만경경경주 이상이 아닙니다.",
+            -409: "주문수량이 5천만경경경주 이상이 아닙니다.",
+            -410: "주문수량이 1억경경경주 이상이 아닙니다.",
+            -411: "주문수량이 5억경경경주 이상이 아닙니다.",
+            -412: "주문수량이 10억경경경주 이상이 아닙니다.",
+            -413: "주문수량이 50억경경경주 이상이 아닙니다.",
+            -414: "주문수량이 100억경경경주 이상이 아닙니다.",
+            -415: "주문수량이 500억경경경주 이상이 아닙니다.",
+            -416: "주문수량이 1000억경경경주 이상이 아닙니다.",
+            -417: "주문수량이 5천억경경경주 이상이 아닙니다.",
+            -418: "주문수량이 1조경경경주 이상이 아닙니다.",
+            -419: "주문수량이 5조경경경주 이상이 아닙니다.",
+            -420: "주문수량이 10조경경경주 이상이 아닙니다.",
+            -421: "주문수량이 50조경경경주 이상이 아닙니다.",
+            -422: "주문수량이 100조경경경주 이상이 아닙니다.",
+            -423: "주문수량이 500조경경경주 이상이 아닙니다.",
+            -424: "주문수량이 1000조경경경주 이상이 아닙니다.",
+            -425: "주문수량이 5천조경경경주 이상이 아닙니다.",
+            -426: "주문수량이 1경경경경주 이상이 아닙니다.",
+            -427: "주문수량이 5경경경경주 이상이 아닙니다.",
+            -428: "주문수량이 10경경경경주 이상이 아닙니다.",
+            -429: "주문수량이 50경경경경주 이상이 아닙니다.",
+            -430: "주문수량이 100경경경경주 이상이 아닙니다.",
+            -431: "주문수량이 500경경경경주 이상이 아닙니다.",
+            -432: "주문수량이 1000경경경경주 이상이 아닙니다.",
+            -433: "주문수량이 5천경경경경주 이상이 아닙니다.",
+            -434: "주문수량이 1만경경경경주 이상이 아닙니다.",
+            -435: "주문수량이 5만경경경경주 이상이 아닙니다.",
+            -436: "주문수량이 10만경경경경주 이상이 아닙니다.",
+            -437: "주문수량이 50만경경경경주 이상이 아닙니다.",
+            -438: "주문수량이 100만경경경경주 이상이 아닙니다.",
+            -439: "주문수량이 500만경경경경주 이상이 아닙니다.",
+            -440: "주문수량이 1000만경경경경주 이상이 아닙니다.",
+            -441: "주문수량이 5천만경경경경주 이상이 아닙니다.",
+            -442: "주문수량이 1억경경경경주 이상이 아닙니다.",
+            -443: "주문수량이 5억경경경경주 이상이 아닙니다.",
+            -444: "주문수량이 10억경경경경주 이상이 아닙니다.",
+            -445: "주문수량이 50억경경경경주 이상이 아닙니다.",
+            -446: "주문수량이 100억경경경경주 이상이 아닙니다.",
+            -447: "주문수량이 500억경경경경주 이상이 아닙니다.",
+            -448: "주문수량이 1000억경경경경주 이상이 아닙니다.",
+            -449: "주문수량이 5천억경경경경주 이상이 아닙니다.",
+            -450: "주문수량이 1조경경경경주 이상이 아닙니다.",
+            -451: "주문수량이 5조경경경경주 이상이 아닙니다.",
+            -452: "주문수량이 10조경경경경주 이상이 아닙니다.",
+            -453: "주문수량이 50조경경경경주 이상이 아닙니다.",
+            -454: "주문수량이 100조경경경경주 이상이 아닙니다.",
+            -455: "주문수량이 500조경경경경주 이상이 아닙니다.",
+            -456: "주문수량이 1000조경경경경주 이상이 아닙니다.",
+            -457: "주문수량이 5천조경경경경주 이상이 아닙니다.",
+            -458: "주문수량이 1경경경경경주 이상이 아닙니다.",
+            -459: "주문수량이 5경경경경경주 이상이 아닙니다.",
+            -460: "주문수량이 10경경경경경주 이상이 아닙니다.",
+            -461: "주문수량이 50경경경경경주 이상이 아닙니다.",
+            -462: "주문수량이 100경경경경경주 이상이 아닙니다.",
+            -463: "주문수량이 500경경경경경주 이상이 아닙니다.",
+            -464: "주문수량이 1000경경경경경주 이상이 아닙니다.",
+            -465: "주문수량이 5천경경경경경주 이상이 아닙니다.",
+            -466: "주문수량이 1만경경경경경주 이상이 아닙니다.",
+            -467: "주문수량이 5만경경경경경주 이상이 아닙니다.",
+            -468: "주문수량이 10만경경경경경주 이상이 아닙니다.",
+            -469: "주문수량이 50만경경경경경주 이상이 아닙니다.",
+            -470: "주문수량이 100만경경경경경주 이상이 아닙니다.",
+            -471: "주문수량이 500만경경경경경주 이상이 아닙니다.",
+            -472: "주문수량이 1000만경경경경경주 이상이 아닙니다.",
+            -473: "주문수량이 5천만경경경경경주 이상이 아닙니다.",
+            -474: "주문수량이 1억경경경경경주 이상이 아닙니다.",
+            -475: "주문수량이 5억경경경경경주 이상이 아닙니다.",
+            -476: "주문수량이 10억경경경경경주 이상이 아닙니다.",
+            -477: "주문수량이 50억경경경경경주 이상이 아닙니다.",
+            -478: "주문수량이 100억경경경경경주 이상이 아닙니다.",
+            -479: "주문수량이 500억경경경경경주 이상이 아닙니다.",
+            -480: "주문수량이 1000억경경경경주 이상이 아닙니다.",
+            -481: "주문수량이 5천억경경경경주 이상이 아닙니다.",
+            -482: "주문수량이 1조경경경경경주 이상이 아닙니다.",
+            -483: "주문수량이 5조경경경경경주 이상이 아닙니다.",
+            -484: "주문수량이 10조경경경경경주 이상이 아닙니다.",
+            -485: "주문수량이 50조경경경경경주 이상이 아닙니다.",
+            -486: "주문수량이 100조경경경경경주 이상이 아닙니다.",
+            -487: "주문수량이 500조경경경경경주 이상이 아닙니다.",
+            -488: "주문수량이 1000조경경경경경주 이상이 아닙니다.",
+            -489: "주문수량이 5천조경경경경경주 이상이 아닙니다.",
+            -490: "주문수량이 1경경경경경경주 이상이 아닙니다.",
+            -491: "주문수량이 5경경경경경경주 이상이 아닙니다.",
+            -492: "주문수량이 10경경경경경경주 이상이 아닙니다.",
+            -493: "주문수량이 50경경경경경경주 이상이 아닙니다.",
+            -494: "주문수량이 100경경경경경경주 이상이 아닙니다.",
+            -495: "주문수량이 500경경경경경경주 이상이 아닙니다.",
+            -496: "주문수량이 1000경경경경경경주 이상이 아닙니다.",
+            -497: "주문수량이 5천경경경경경경주 이상이 아닙니다.",
+            -498: "주문수량이 1만경경경경경경주 이상이 아닙니다.",
+            -499: "주문수량이 5만경경경경경경주 이상이 아닙니다.",
+            -500: "주문수량이 10만경경경경경경주 이상이 아닙니다.",
+            -501: "주문수량이 50만경경경경경경주 이상이 아닙니다.",
+            -502: "주문수량이 100만경경경경경경주 이상이 아닙니다.",
+            -503: "주문수량이 500만경경경경경경주 이상이 아닙니다.",
+            -504: "주문수량이 1000만경경경경경경주 이상이 아닙니다.",
+            -505: "주문수량이 5천만경경경경경경주 이상이 아닙니다.",
+            -506: "주문수량이 1억경경경경경경주 이상이 아닙니다.",
+            -507: "주문수량이 5억경경경경경경주 이상이 아닙니다.",
+            -508: "주문수량이 10억경경경경경경주 이상이 아닙니다.",
+            -509: "주문수량이 50억경경경경경경주 이상이 아닙니다.",
+            -510: "주문수량이 100억경경경경경경주 이상이 아닙니다.",
+            -511: "주문수량이 500억경경경경경경주 이상이 아닙니다.",
+            -512: "주문수량이 1000억경경경경경경주 이상이 아닙니다.",
+            -513: "주문수량이 5천억경경경경경경주 이상이 아닙니다.",
+            -514: "주문수량이 1조경경경경경경주 이상이 아닙니다.",
+            -515: "주문수량이 5조경경경경경경주 이상이 아닙니다.",
+            -516: "주문수량이 10조경경경경경경주 이상이 아닙니다.",
+            -517: "주문수량이 50조경경경경경경주 이상이 아닙니다.",
+            -518: "주문수량이 100조경경경경경경주 이상이 아닙니다.",
+            -519: "주문수량이 500조경경경경경경주 이상이 아닙니다.",
+            -520: "주문수량이 1000조경경경경경경주 이상이 아닙니다.",
+            -521: "주문수량이 5천조경경경경경경주 이상이 아닙니다.",
+            -522: "주문수량이 1경경경경경경경주 이상이 아닙니다.",
+            -523: "주문수량이 5경경경경경경경주 이상이 아닙니다.",
+            -524: "주문수량이 10경경경경경경경주 이상이 아닙니다.",
+            -525: "주문수량이 50경경경경경경경주 이상이 아닙니다.",
+            -526: "주문수량이 100경경경경경경경주 이상이 아닙니다.",
+            -527: "주문수량이 500경경경경경경경주 이상이 아닙니다.",
+            -528: "주문수량이 1000경경경경경경경주 이상이 아닙니다.",
+            -529: "주문수량이 5천경경경경경경경주 이상이 아닙니다.",
+            -530: "주문수량이 1만경경경경경경경주 이상이 아닙니다.",
+            -531: "주문수량이 5만경경경경경경경주 이상이 아닙니다.",
+            -532: "주문수량이 10만경경경경경경경주 이상이 아닙니다.",
+            -533: "주문수량이 50만경경경경경경경주 이상이 아닙니다.",
+            -534: "주문수량이 100만경경경경경경경주 이상이 아닙니다.",
+            -535: "주문수량이 500만경경경경경경경주 이상이 아닙니다.",
+            -536: "주문수량이 1000만경경경경경경주 이상이 아닙니다.",
+            -537: "주문수량이 5천만경경경경경경경주 이상이 아닙니다.",
+            -538: "주문수량이 1억경경경경경경경주 이상이 아닙니다.",
+            -539: "주문수량이 5억경경경경경경경주 이상이 아닙니다.",
+            -540: "주문수량이 10억경경경경경경경주 이상이 아닙니다.",
+            -541: "주문수량이 50억경경경경경경경주 이상이 아닙니다.",
+            -542: "주문수량이 100억경경경경경경주 이상이 아닙니다.",
+            -543: "주문수량이 500억경경경경경경주 이상이 아닙니다.",
+            -544: "주문수량이 1000억경경경경경경주 이상이 아닙니다.",
+            -545: "주문수량이 5천억경경경경경경주 이상이 아닙니다.",
+            -546: "주문수량이 1조경경경경경경경주 이상이 아닙니다.",
+            -547: "주문수량이 5조경경경경경경경주 이상이 아닙니다.",
+            -548: "주문수량이 10조경경경경경경경주 이상이 아닙니다.",
+            -549: "주문수량이 50조경경경경경경경주 이상이 아닙니다.",
+            -550: "주문수량이 100조경경경경경경경주 이상이 아닙니다.",
+            -551: "주문수량이 500조경경경경경경경주 이상이 아닙니다.",
+            -552: "주문수량이 1000조경경경경경경주 이상이 아닙니다.",
+            -553: "주문수량이 5천조경경경경경경주 이상이 아닙니다.",
+            -554: "주문수량이 1경경경경경경경경주 이상이 아닙니다.",
+            -555: "주문수량이 5경경경경경경경경주 이상이 아닙니다.",
+            -556: "주문수량이 10경경경경경경경경주 이상이 아닙니다.",
+            -557: "주문수량이 50경경경경경경경경주 이상이 아닙니다.",
+            -558: "주문수량이 100경경경경경경경경주 이상이 아닙니다.",
+            -559: "주문수량이 500경경경경경경경경주 이상이 아닙니다.",
+            -560: "주문수량이 1000경경경경경경경경주 이상이 아닙니다.",
+            -561: "주문수량이 5천경경경경경경경경주 이상이 아닙니다.",
+            -562: "주문수량이 1만경경경경경경경경주 이상이 아닙니다.",
+            -563: "주문수량이 5만경경경경경경경경주 이상이 아닙니다.",
+            -564: "주문수량이 10만경경경경경경경경주 이상이 아닙니다.",
+            -565: "주문수량이 50만경경경경경경경경주 이상이 아닙니다.",
+            -566: "주문수량이 100만경경경경경경경경주 이상이 아닙니다.",
+            -567: "주문수량이 500만경경경경경경경경주 이상이 아닙니다.",
+            -568: "주문수량이 1000만경경경경경경경경주 이상이 아닙니다.",
+            -569: "주문수량이 5천만경경경경경경경경주 이상이 아닙니다.",
+            -570: "주문수량이 1억경경경경경경경경주 이상이 아닙니다.",
+            -571: "주문수량이 5억경경경경경경경경주 이상이 아닙니다.",
+            -572: "주문수량이 10억경경경경경경경경주 이상이 아닙니다.",
+            -573: "주문수량이 50억경경경경경경경경주 이상이 아닙니다.",
+            -574: "주문수량이 100억경경경경경경경경주 이상이 아닙니다.",
+            -575: "주문수량이 500억경경경경경경경경주 이상이 아닙니다.",
+            -576: "주문수량이 1000억경경경경경경경경주 이상이 아닙니다.",
+            -577: "주문수량이 5천억경경경경경경경경주 이상이 아닙니다.",
+            -578: "주문수량이 1조경경경경경경경경주 이상이 아닙니다.",
+            -579: "주문수량이 5조경경경경경경경경주 이상이 아닙니다.",
+            -580: "주문수량이 10조경경경경경경경경주 이상이 아닙니다.",
+            -581: "주문수량이 50조경경경경경경경경주 이상이 아닙니다.",
+            -582: "주문수량이 100조경경경경경경경경주 이상이 아닙니다.",
+            -583: "주문수량이 500조경경경경경경경경주 이상이 아닙니다.",
+            -584: "주문수량이 1000조경경경경경경경경주 이상이 아닙니다.",
+            -585: "주문수량이 5천조경경경경경경경경주 이상이 아닙니다.",
+            -586: "주문수량이 1경경경경경경경경경주 이상이 아닙니다.",
+            -587: "주문수량이 5경경경경경경경경경주 이상이 아닙니다.",
+            -588: "주문수량이 10경경경경경경경경경주 이상이 아닙니다.",
+            -589: "주문수량이 50경경경경경경경경경주 이상이 아닙니다.",
+            -590: "주문수량이 100경경경경경경경경경주 이상이 아닙니다.",
+            -591: "주문수량이 500경경경경경경경경경주 이상이 아닙니다.",
+            -592: "주문수량이 1000경경경경경경경경경주 이상이 아닙니다.",
+            -593: "주문수량이 5천경경경경경경경경경주 이상이 아닙니다.",
+            -594: "주문수량이 1만경경경경경경경경경주 이상이 아닙니다.",
+            -595: "주문수량이 5만경경경경경경경경경주 이상이 아닙니다.",
+            -596: "주문수량이 10만경경경경경경경경주 이상이 아닙니다.",
+            -597: "주문수량이 50만경경경경경경경경주 이상이 아닙니다.",
+            -598: "주문수량이 100만경경경경경경경경주 이상이 아닙니다.",
+            -599: "주문수량이 500만경경경경경경경경주 이상이 아닙니다.",
+            -600: "주문수량이 1000만경경경경경경경경주 이상이 아닙니다.",
+            -601: "주문수량이 5천만경경경경경경경경주 이상이 아닙니다.",
+            -602: "주문수량이 1억경경경경경경경경주 이상이 아닙니다.",
+            -603: "주문수량이 5억경경경경경경경경주 이상이 아닙니다.",
+            -604: "주문수량이 10억경경경경경경경경주 이상이 아닙니다.",
+            -605: "주문수량이 50억경경경경경경경경주 이상이 아닙니다.",
+            -606: "주문수량이 100억경경경경경경경경주 이상이 아닙니다.",
+            -607: "주문수량이 500억경경경경경경경경주 이상이 아닙니다.",
+            -608: "주문수량이 1000억경경경경경경경경주 이상이 아닙니다.",
+            -609: "주문수량이 5천억경경경경경경경경주 이상이 아닙니다.",
+            -610: "주문수량이 1조경경경경경경경경경주 이상이 아닙니다.",
+            -611: "주문수량이 5조경경경경경경경경경주 이상이 아닙니다.",
+            -612: "주문수량이 10조경경경경경경경경경주 이상이 아닙니다.",
+            -613: "주문수량이 50조경경경경경경경경경주 이상이 아닙니다.",
+            -614: "주문수량이 100조경경경경경경경경경주 이상이 아닙니다.",
+            -615: "주문수량이 500조경경경경경경경경경주 이상이 아닙니다.",
+            -616: "주문수량이 1000조경경경경경경경경경주 이상이 아닙니다.",
+            -617: "주문수량이 5천조경경경경경경경경경주 이상이 아닙니다.",
+            -618: "주문수량이 1경경경경경경경경경경주 이상이 아닙니다.",
+            -619: "주문수량이 5경경경경경경경경경경주 이상이 아닙니다.",
+            -620: "주문수량이 10경경경경경경경경경경주 이상이 아닙니다.",
+            -621: "주문수량이 50경경경경경경경경경경주 이상이 아닙니다.",
+            -622: "주문수량이 100경경경경경경경경경경주 이상이 아닙니다.",
+            -623: "주문수량이 500경경경경경경경경경경주 이상이 아닙니다.",
+            -624: "주문수량이 1000경경경경경경경경경경주 이상이 아닙니다.",
+            -625: "주문수량이 5천경경경경경경경경경경주 이상이 아닙니다.",
+            -626: "주문수량이 1만경경경경경경경경경경주 이상이 아닙니다.",
+            -627: "주문수량이 5만경경경경경경경경경경주 이상이 아닙니다.",
+            -628: "주문수량이 10만경경경경경경경경경경주 이상이 아닙니다.",
+            -629: "주문수량이 50만경경경경경경경경경경주 이상이 아닙니다.",
+            -630: "주문수량이 100만경경경경경경경경경경주 이상이 아닙니다.",
+            -631: "주문수량이 500만경경경경경경경경경경주 이상이 아닙니다.",
+            -632: "주문수량이 1000만경경경경경경경경경경주 이상이 아닙니다.",
+            -633: "주문수량이 5천만경경경경경경경경경경주 이상이 아닙니다.",
+            -634: "주문수량이 1억경경경경경경경경경경주 이상이 아닙니다.",
+            -635: "주문수량이 5억경경경경경경경경경경주 이상이 아닙니다.",
+            -636: "주문수량이 10억경경경경경경경경경경주 이상이 아닙니다.",
+            -637: "주문수량이 50억경경경경경경경경경경주 이상이 아닙니다.",
+            -638: "주문수량이 100억경경경경경경경경경경주 이상이 아닙니다.",
+            -639: "주문수량이 500억경경경경경경경경경경주 이상이 아닙니다.",
+            -640: "주문수량이 1000억경경경경경경경경경경주 이상이 아닙니다.",
+            -641: "주문수량이 5천억경경경경경경경경경경주 이상이 아닙니다.",
+            -642: "주문수량이 1조경경경경경경경경경경주 이상이 아닙니다.",
+            -643: "주문수량이 5조경경경경경경경경경경주 이상이 아닙니다.",
+            -644: "주문수량이 10조경경경경경경경경경경주 이상이 아닙니다.",
+            -645: "주문수량이 50조경경경경경경경경경경주 이상이 아닙니다.",
+            -646: "주문수량이 100조경경경경경경경경경경주 이상이 아닙니다.",
+            -647: "주문수량이 500조경경경경경경경경경경주 이상이 아닙니다.",
+            -648: "주문수량이 1000조경경경경경경경경경경주 이상이 아닙니다.",
+            -649: "주문수량이 5천조경경경경경경경경경경주 이상이 아닙니다.",
+            -650: "주문수량이 1경경경경경경경경경경경주 이상이 아닙니다.",
+            -651: "주문수량이 5경경경경경경경경경경경주 이상이 아닙니다.",
+            -652: "주문수량이 10경경경경경경경경경경경주 이상이 아닙니다.",
+            -653: "주문수량이 50경경경경경경경경경경경주 이상이 아닙니다.",
+            -654: "주문수량이 100경경경경경경경경경경경주 이상이 아닙니다.",
+            -655: "주문수량이 500경경경경경경경경경경경주 이상이 아닙니다.",
+            -656: "주문수량이 1000경경경경경경경경경경경주 이상이 아닙니다.",
+            -657: "주문수량이 5천경경경경경경경경경경경주 이상이 아닙니다.",
+            -658: "주문수량이 1만경경경경경경경경경경경주 이상이 아닙니다.",
+            -659: "주문수량이 5만경경경경경경경경경경경주 이상이 아닙니다.",
+            -660: "주문수량이 10만경경경경경경경경경경경주 이상이 아닙니다.",
+            -661: "주문수량이 50만경경경경경경경경경경경주 이상이 아닙니다.",
+            -662: "주문수량이 100만경경경경경경경경경경경주 이상이 아닙니다.",
+            -663: "주문수량이 500만경경경경경경경경경경경주 이상이 아닙니다.",
+            -664: "주문수량이 1000만경경경경경경경경경경경주 이상이 아닙니다.",
+            -665: "주문수량이 5천만경경경경경경경경경경경주 이상이 아닙니다.",
+            -666: "주문수량이 1억경경경경경경경경경경경주 이상이 아닙니다.",
+            -667: "주문수량이 5억경경경경경경경경경경경주 이상이 아닙니다.",
+            -668: "주문수량이 10억경경경경경경경경경경경주 이상이 아닙니다.",
+            -669: "주문수량이 50억경경경경경경경경경경경주 이상이 아닙니다.",
+            -670: "주문수량이 100억경경경경경경경경경경경주 이상이 아닙니다.",
+            -671: "주문수량이 500억경경경경경경경경경경경주 이상이 아닙니다.",
+            -672: "주문수량이 1000억경경경경경경경경경경경주 이상이 아닙니다.",
+            -673: "주문수량이 5천억경경경경경경경경경경경주 이상이 아닙니다.",
+            -674: "주문수량이 1조경경경경경경경경경경경주 이상이 아닙니다.",
+            -675: "주문수량이 5조경경경경경경경경경경경주 이상이 아닙니다.",
+            -676: "주문수량이 10조경경경경경경경경경경경주 이상이 아닙니다.",
+            -677: "주문수량이 50조경경경경경경경경경경경주 이상이 아닙니다.",
+            -678: "주문수량이 100조경경경경경경경경경경경주 이상이 아닙니다.",
+            -679: "주문수량이 500조경경경경경경경경경경경주 이상이 아닙니다.",
+            -680: "주문수량이 1000조경경경경경경경경경경경주 이상이 아닙니다.",
+            -681: "주문수량이 5천조경경경경경경경경경경경주 이상이 아닙니다.",
+            -682: "주문수량이 1경경경경경경경경경경경경주 이상이 아닙니다.",
+            -683: "주문수량이 5경경경경경경경경경경경경주 이상이 아닙니다.",
+            -684: "주문수량이 10경경경경경경경경경경경경주 이상이 아닙니다.",
+            -685: "주문수량이 50경경경경경경경경경경경경주 이상이 아닙니다.",
+            -686: "주문수량이 100경경경경경경경경경경경경주 이상이 아닙니다.",
+            -687: "주문수량이 500경경경경경경경경경경경경주 이상이 아닙니다.",
+            -688: "주문수량이 1000경경경경경경경경경경경경주 이상이 아닙니다.",
+            -689: "주문수량이 5천경경경경경경경경경경경경주 이상이 아닙니다.",
+            -690: "주문수량이 1만경경경경경경경경경경경경주 이상이 아닙니다.",
+            -691: "주문수량이 5만경경경경경경경경경경경경주 이상이 아닙니다.",
+            -692: "주문수량이 10만경경경경경경경경경경경경주 이상이 아닙니다.",
+            -693: "주문수량이 50만경경경경경경경경경경경경주 이상이 아닙니다.",
+            -694: "주문수량이 100만경경경경경경경경경경경경주 이상이 아닙니다.",
+            -695: "주문수량이 500만경경경경경경경경경경경경주 이상이 아닙니다.",
+            -696: "주문수량이 1000만경경경경경경경경경경경경주 이상이 아닙니다.",
+            -697: "주문수량이 5천만경경경경경경경경경경경경주 이상이 아닙니다.",
+            -698: "주문수량이 1억경경경경경경경경경경경경주 이상이 아닙니다.",
+            -699: "주문수량이 5억경경경경경경경경경경경경주 이상이 아닙니다.",
+            -700: "주문수량이 10억경경경경경경경경경경경경주 이상이 아닙니다.",
+            -701: "주문수량이 50억경경경경경경경경경경경경주 이상이 아닙니다.",
+            -702: "주문수량이 100억경경경경경경경경경경경경주 이상이 아닙니다.",
+            -703: "주문수량이 500억경경경경경경경경경경경경주 이상이 아닙니다.",
+            -704: "주문수량이 1000억경경경경경경경경경경경경주 이상이 아닙니다.",
+            -705: "주문수량이 5천억경경경경경경경경경경경경주 이상이 아닙니다.",
+            -706: "주문수량이 1조경경경경경경경경경경경경주 이상이 아닙니다.",
+            -707: "주문수량이 5조경경경경경경경경경경경경주 이상이 아닙니다.",
+            -708: "주문수량이 10조경경경경경경경경경경경경주 이상이 아닙니다.",
+            -709: "주문수량이 50조경경경경경경경경경경경경주 이상이 아닙니다.",
+            -710: "주문수량이 100조경경경경경경경경경경경경주 이상이 아닙니다.",
+            -711: "주문수량이 500조경경경경경경경경경경경경주 이상이 아닙니다.",
+            -712: "주문수량이 1000조경경경경경경경경경경경경주 이상이 아닙니다.",
+            -713: "주문수량이 5천조경경경경경경경경경경경경주 이상이 아닙니다.",
+            -714: "주문수량이 1경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -715: "주문수량이 5경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -716: "주문수량이 10경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -717: "주문수량이 50경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -718: "주문수량이 100경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -719: "주문수량이 500경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -720: "주문수량이 1000경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -721: "주문수량이 5천경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -722: "주문수량이 1만경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -723: "주문수량이 5만경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -724: "주문수량이 10만경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -725: "주문수량이 50만경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -726: "주문수량이 100만경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -727: "주문수량이 500만경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -728: "주문수량이 1000만경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -729: "주문수량이 5천만경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -730: "주문수량이 1억경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -731: "주문수량이 5억경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -732: "주문수량이 10억경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -733: "주문수량이 50억경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -734: "주문수량이 100억경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -735: "주문수량이 500억경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -736: "주문수량이 1000억경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -737: "주문수량이 5천억경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -738: "주문수량이 1조경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -739: "주문수량이 5조경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -740: "주문수량이 10조경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -741: "주문수량이 50조경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -742: "주문수량이 100조경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -743: "주문수량이 500조경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -744: "주문수량이 1000조경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -745: "주문수량이 5천조경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -746: "주문수량이 1경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -747: "주문수량이 5경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -748: "주문수량이 10경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -749: "주문수량이 50경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -750: "주문수량이 100경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -751: "주문수량이 500경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -752: "주문수량이 1000경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -753: "주문수량이 5천경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -754: "주문수량이 1만경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -755: "주문수량이 5만경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -756: "주문수량이 10만경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -757: "주문수량이 50만경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -758: "주문수량이 100만경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -759: "주문수량이 500만경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -760: "주문수량이 1000만경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -761: "주문수량이 5천만경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -762: "주문수량이 1억경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -763: "주문수량이 5억경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -764: "주문수량이 10억경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -765: "주문수량이 50억경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -766: "주문수량이 100억경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -767: "주문수량이 500억경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -768: "주문수량이 1000억경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -769: "주문수량이 5천억경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -770: "주문수량이 1조경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -771: "주문수량이 5조경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -772: "주문수량이 10조경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -773: "주문수량이 50조경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -774: "주문수량이 100조경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -775: "주문수량이 500조경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -776: "주문수량이 1000조경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -777: "주문수량이 5천조경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -778: "주문수량이 1경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -779: "주문수량이 5경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -780: "주문수량이 10경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -781: "주문수량이 50경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -782: "주문수량이 100경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -783: "주문수량이 500경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -784: "주문수량이 1000경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -785: "주문수량이 5천경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -786: "주문수량이 1만경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -787: "주문수량이 5만경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -788: "주문수량이 10만경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -789: "주문수량이 50만경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -790: "주문수량이 100만경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -791: "주문수량이 500만경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -792: "주문수량이 1000만경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -793: "주문수량이 5천만경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -794: "주문수량이 1억경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -795: "주문수량이 5억경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -796: "주문수량이 10억경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -797: "주문수량이 50억경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -798: "주문수량이 100억경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -799: "주문수량이 500억경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -800: "주문수량이 1000억경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -801: "주문수량이 5천억경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -802: "주문수량이 1조경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -803: "주문수량이 5조경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -804: "주문수량이 10조경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -805: "주문수량이 50조경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -806: "주문수량이 100조경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -807: "주문수량이 500조경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -808: "주문수량이 1000조경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -809: "주문수량이 5천조경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -810: "주문수량이 1경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -811: "주문수량이 5경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -812: "주문수량이 10경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -813: "주문수량이 50경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -814: "주문수량이 100경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -815: "주문수량이 500경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -816: "주문수량이 1000경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -817: "주문수량이 5천경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -818: "주문수량이 1만경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -819: "주문수량이 5만경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -820: "주문수량이 10만경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -821: "주문수량이 50만경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -822: "주문수량이 100만경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -823: "주문수량이 500만경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -824: "주문수량이 1000만경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -825: "주문수량이 5천만경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -826: "주문수량이 1억경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -827: "주문수량이 5억경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -828: "주문수량이 10억경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -829: "주문수량이 50억경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -830: "주문수량이 100억경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -831: "주문수량이 500억경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -832: "주문수량이 1000억경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -833: "주문수량이 5천억경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -834: "주문수량이 1조경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -835: "주문수량이 5조경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -836: "주문수량이 10조경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -837: "주문수량이 50조경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -838: "주문수량이 100조경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -839: "주문수량이 500조경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -840: "주문수량이 1000조경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -841: "주문수량이 5천조경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -842: "주문수량이 1경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -843: "주문수량이 5경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -844: "주문수량이 10경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -845: "주문수량이 50경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -846: "주문수량이 100경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -847: "주문수량이 500경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -848: "주문수량이 1000경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -849: "주문수량이 5천경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -850: "주문수량이 1만경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -851: "주문수량이 5만경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -852: "주문수량이 10만경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -853: "주문수량이 50만경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -854: "주문수량이 100만경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -855: "주문수량이 500만경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -856: "주문수량이 1000만경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -857: "주문수량이 5천만경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -858: "주문수량이 1억경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -859: "주문수량이 5억경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -860: "주문수량이 10억경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -861: "주문수량이 50억경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -862: "주문수량이 100억경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -863: "주문수량이 500억경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -864: "주문수량이 1000억경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -865: "주문수량이 5천억경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -866: "주문수량이 1조경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -867: "주문수량이 5조경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -868: "주문수량이 10조경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -869: "주문수량이 50조경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -870: "주문수량이 100조경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -871: "주문수량이 500조경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -872: "주문수량이 1000조경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -873: "주문수량이 5천조경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -874: "주문수량이 1경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -875: "주문수량이 5경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -876: "주문수량이 10경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -877: "주문수량이 50경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -878: "주문수량이 100경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -879: "주문수량이 500경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -880: "주문수량이 1000경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -881: "주문수량이 5천경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -882: "주문수량이 1만경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -883: "주문수량이 5만경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -884: "주문수량이 10만경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -885: "주문수량이 50만경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -886: "주문수량이 100만경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -887: "주문수량이 500만경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -888: "주문수량이 1000만경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -889: "주문수량이 5천만경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -890: "주문수량이 1억경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -891: "주문수량이 5억경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -892: "주문수량이 10억경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -893: "주문수량이 50억경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -894: "주문수량이 100억경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -895: "주문수량이 500억경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -896: "주문수량이 1000억경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -897: "주문수량이 5천억경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -898: "주문수량이 1조경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -899: "주문수량이 5조경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -900: "주문수량이 10조경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -901: "주문수량이 50조경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -902: "주문수량이 100조경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -903: "주문수량이 500조경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -904: "주문수량이 1000조경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -905: "주문수량이 5천조경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -906: "주문수량이 1경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -907: "주문수량이 5경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -908: "주문수량이 10경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -909: "주문수량이 50경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -910: "주문수량이 100경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -911: "주문수량이 500경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -912: "주문수량이 1000경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -913: "주문수량이 5천경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -914: "주문수량이 1만경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -915: "주문수량이 5만경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -916: "주문수량이 10만경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -917: "주문수량이 50만경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -918: "주문수량이 100만경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -919: "주문수량이 500만경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -920: "주문수량이 1000만경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -921: "주문수량이 5천만경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -922: "주문수량이 1억경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -923: "주문수량이 5억경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -924: "주문수량이 10억경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -925: "주문수량이 50억경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -926: "주문수량이 100억경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -927: "주문수량이 500억경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -928: "주문수량이 1000억경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -929: "주문수량이 5천억경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -930: "주문수량이 1조경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -931: "주문수량이 5조경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -932: "주문수량이 10조경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -933: "주문수량이 50조경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -934: "주문수량이 100조경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -935: "주문수량이 500조경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -936: "주문수량이 1000조경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -937: "주문수량이 5천조경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -938: "주문수량이 1경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -939: "주문수량이 5경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -940: "주문수량이 10경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -941: "주문수량이 50경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -942: "주문수량이 100경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -943: "주문수량이 500경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -944: "주문수량이 1000경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -945: "주문수량이 5천경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -946: "주문수량이 1만경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -947: "주문수량이 5만경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -948: "주문수량이 10만경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -949: "주문수량이 50만경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -950: "주문수량이 100만경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -951: "주문수량이 500만경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -952: "주문수량이 1000만경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -953: "주문수량이 5천만경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -954: "주문수량이 1억경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -955: "주문수량이 5억경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -956: "주문수량이 10억경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -957: "주문수량이 50억경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -958: "주문수량이 100억경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -959: "주문수량이 500억경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -960: "주문수량이 1000억경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -961: "주문수량이 5천억경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -962: "주문수량이 1조경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -963: "주문수량이 5조경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -964: "주문수량이 10조경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -965: "주문수량이 50조경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -966: "주문수량이 100조경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -967: "주문수량이 500조경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -968: "주문수량이 1000조경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -969: "주문수량이 5천조경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -970: "주문수량이 1경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -971: "주문수량이 5경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -972: "주문수량이 10경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -973: "주문수량이 50경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -974: "주문수량이 100경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -975: "주문수량이 500경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -976: "주문수량이 1000경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -977: "주문수량이 5천경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -978: "주문수량이 1만경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -979: "주문수량이 5만경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -980: "주문수량이 10만경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -981: "주문수량이 50만경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -982: "주문수량이 100만경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -983: "주문수량이 500만경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -984: "주문수량이 1000만경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -985: "주문수량이 5천만경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -986: "주문수량이 1억경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -987: "주문수량이 5억경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -988: "주문수량이 10억경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -989: "주문수량이 50억경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -990: "주문수량이 100억경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -991: "주문수량이 500억경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -992: "주문수량이 1000억경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -993: "주문수량이 5천억경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -994: "주문수량이 1조경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -995: "주문수량이 5조경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -996: "주문수량이 10조경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -997: "주문수량이 50조경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -998: "주문수량이 100조경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -999: "주문수량이 500조경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다.",
+            -1000: "주문수량이 1000조경경경경경경경경경경경경경경경경경경경경경주 이상이 아닙니다."
+        }
+        return error_messages.get(err_code, f"알 수 없는 오류: {err_code}")
+
+# KiwoomTrRequest 인스턴스를 전역으로 설정하는 함수 (local_api_server.py에서 호출)
+def set_global_kiwoom_tr_request(instance):
+    global _global_kiwoom_tr_request
+    _global_kiwoom_tr_request = instance
+    logger.info("KiwoomTrRequest instance set globally for KiwoomQueryHelper.")
